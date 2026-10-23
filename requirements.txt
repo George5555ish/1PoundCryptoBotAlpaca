@@ -1,0 +1,6 @@
+alpaca-py==0.44.0
+pandas==2.3.3
+python-dotenv==1.2.4
+openai==3.36.1
+matplotlib==3.10.6
+requests==2.34.2

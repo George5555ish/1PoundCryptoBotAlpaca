@@ -1,0 +1,15 @@
+# Railway service. If the git repository root is the parent folder, set
+# the service root directory to crypto-bot.
+#
+# The start command is a dry run. When the paper account should actually
+# receive orders, change it to: python main.py --send-orders
+# Live trading is still refused by the process. Run one replica only.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python main.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
