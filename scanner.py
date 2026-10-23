@@ -249,29 +249,13 @@ def _bar_time(value: object) -> str:
     return str(value)
 
 
-def _log_retrieved_candles(symbol: str, rows: list[dict[str, object]], summary: dict[str, object]) -> None:
-    """Log the bars that were kept and the compact summary built from them.
+def _log_retrieved_candles(symbol: str, summary: dict[str, object]) -> None:
+    """Log the compact candle summary.
 
-    These lines stay in the bot log. The chart bars stay on the scan result for
-    the snapshot, and the prompt builder drops them before the model sees them.
+    Individual bars stay off the log. They remain on the scan result for the
+    chart, and the prompt builder drops them before the model sees them.
     """
 
-    logger.info(
-        "SCAN candles %s retrieved=%s timeframe=%sm",
-        symbol,
-        len(rows),
-        config.CANDLE_MINUTES,
-    )
-    for row in rows:
-        logger.info(
-            "SCAN candle %s time=%s open=%s high=%s low=%s close=%s",
-            symbol,
-            _bar_time(row.get("timestamp") or row.get("time")),
-            _price(row.get("open")) or "",
-            _price(row.get("high")) or "",
-            _price(row.get("low")) or "",
-            _price(row.get("close")) or "",
-        )
     logger.info(
         "SCAN candle_summary %s bar_count=%s last_close=%s highest_high=%s lowest_low=%s trend=%s average_true_range=%s error=%s",
         symbol,
@@ -342,7 +326,7 @@ def fetch_candle_summaries(client, symbols: tuple[str, ...]) -> dict[str, Candle
         logger.exception("SCAN candles failed")
         failed = {symbol: _failed_read("candle fetch failed") for symbol in canonical}
         for symbol, read in failed.items():
-            _log_retrieved_candles(symbol, [], read.summary)
+            _log_retrieved_candles(symbol, read.summary)
             logger.info("STRATEGY %s %s", symbol, json.dumps(read.strategy_context, sort_keys=True))
         return failed
 
@@ -363,7 +347,7 @@ def fetch_candle_summaries(client, symbols: tuple[str, ...]) -> dict[str, Candle
             fetched,
             len(read.chart_bars),
         )
-        _log_retrieved_candles(symbol, list(read.chart_bars), read.summary)
+        _log_retrieved_candles(symbol, read.summary)
         logger.info("STRATEGY %s %s", symbol, json.dumps(read.strategy_context, sort_keys=True))
     return reads
 

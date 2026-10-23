@@ -89,9 +89,9 @@ class CandleSummaryTests(unittest.TestCase):
         ]
         summary = scanner.summarize_candles(rows)
         with self.assertLogs("scanner", level="INFO") as captured:
-            scanner._log_retrieved_candles("BTC/USD", rows, summary)
+            scanner._log_retrieved_candles("BTC/USD", summary)
         text = "\n".join(captured.output)
-        self.assertIn("SCAN candle BTC/USD time=2026-10-23T01:00:00+00:00 open=10 high=11 low=9 close=10.5", text)
+        self.assertNotIn("SCAN candle BTC/USD time=", text)
         self.assertIn("SCAN candle_summary BTC/USD bar_count=1", text)
         self.assertIn("last_close=10.5", text)
         self.assertIn("trend=mixed", text)
