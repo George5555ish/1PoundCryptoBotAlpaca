@@ -42,6 +42,7 @@ class PositionBook:
     orders: tuple[risk_gate.WorkingOrder, ...]
     other_position_open: bool
     pending_entry_while_flat: bool
+    pending_symbols: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class OrderResult:
     order_id: str | None
     status: str
     message: str
+    fill_price: str | None = None
 
     def log_line(self) -> str:
         return f"order_id={self.order_id} status={self.status} message={self.message}"
@@ -72,6 +74,18 @@ def build_trading_client(settings: config.Settings):
     )
     config.assert_paper_trading_url(_url_text(getattr(client, "_base_url", "")))
     return client
+
+
+def _text_number(value: object) -> str | None:
+    """Format a broker number for logs. Missing or non-finite values are omitted."""
+
+    try:
+        number = Decimal(str(value))
+    except Exception:
+        return None
+    if not number.is_finite():
+        return None
+    return format(number, "f")
 
 
 def _dec(value: object) -> Decimal | None:
@@ -129,7 +143,15 @@ def fetch_book(client) -> PositionBook:
         if not config.is_allowed_symbol(canonical) or side != "long":
             other = True
             continue
-        positions.append(risk_gate.OpenPosition(symbol=canonical, qty=qty, side="long"))
+        positions.append(
+            risk_gate.OpenPosition(
+                symbol=canonical,
+                qty=qty,
+                side="long",
+                current_price=_text_number(getattr(position, "current_price", None)),
+                unrealized_pl=_text_number(getattr(position, "unrealized_pl", None)),
+            )
+        )
 
     orders: list[risk_gate.WorkingOrder] = []
     request = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=200)
@@ -147,12 +169,16 @@ def fetch_book(client) -> PositionBook:
         orders.append(risk_gate.WorkingOrder(order_id=order_id, symbol=canonical, side=side))
 
     held = {position.symbol for position in positions}
-    pending_entry = (not held) and any(order.side == "buy" for order in orders)
+    pending_symbols = tuple(
+        dict.fromkeys(order.symbol for order in orders if order.side == "buy" and order.symbol not in held)
+    )
+    pending_entry = (not held) and bool(pending_symbols)
     return PositionBook(
         positions=tuple(positions),
         orders=tuple(orders),
         other_position_open=other,
         pending_entry_while_flat=pending_entry,
+        pending_symbols=pending_symbols,
     )
 
 
@@ -218,7 +244,12 @@ def submit(client, decision: risk_gate.RiskDecision, allow_send: bool, book: Pos
         if not decision.symbol:
             raise RuntimeError("close is missing a symbol")
         order = _close_symbol(client, decision.symbol)
-        return OrderResult(str(order.id), str(order.status), "close submitted")
+        return OrderResult(
+            str(order.id),
+            str(order.status),
+            "close submitted",
+            fill_price=_text_number(getattr(order, "filled_avg_price", None)),
+        )
 
     if decision.order_kind != risk_gate.ORDER_KIND_ENTRY:
         raise RuntimeError(f"unsupported order kind {decision.order_kind}")
@@ -273,4 +304,5 @@ def submit(client, decision: risk_gate.RiskDecision, allow_send: bool, book: Pos
         entry_id,
         status,
         f"entry filled {format(filled, 'f')}; protective stop {protection.id}",
+        fill_price=_text_number(getattr(entry, "filled_avg_price", None)),
     )

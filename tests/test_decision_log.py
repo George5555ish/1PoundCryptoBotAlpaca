@@ -92,6 +92,68 @@ class DecisionLogTests(unittest.TestCase):
             log.close()
             store_path.unlink(missing_ok=True)
 
+    def test_action_type_and_entry_levels_round_trip(self) -> None:
+        store_path = Path(__file__).resolve().parent / "_tmp_levels.db"
+        if store_path.exists():
+            store_path.unlink()
+        log = decision_log.DecisionLog(store_path)
+        now = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+        try:
+            self.assertEqual(log.latest_entry_levels("BTC/USD"), (None, None))
+            row_id = log.write(
+                timestamp=now,
+                market_context={
+                    "action_type": "position_review",
+                    "symbol": "ETH/USD",
+                    "current_price": "2500",
+                    "unrealized_pl": "10",
+                    "decision": "hold",
+                    "reason": "hold; trend is higher highs and neither the stop nor the target has been hit",
+                },
+                ai_suggestion=None,
+                risk_verdict="no_trade",
+                risk_reason="hold",
+                risk_decision={"approved": False},
+                position_size="0.5",
+                final_action="no_trade",
+                symbol="ETH/USD",
+                action_type="position_review",
+            )
+            stored = log.get(row_id)
+            assert stored is not None
+            self.assertEqual(stored["action_type"], "position_review")
+            self.assertEqual(stored["market_context"]["decision"], "hold")
+            self.assertEqual(stored["market_context"]["unrealized_pl"], "10")
+            log.write(
+                timestamp=now,
+                market_context={"action_type": "entry_evaluation"},
+                ai_suggestion={"action": "enter"},
+                risk_verdict="approve",
+                risk_reason="sized",
+                risk_decision={"stop_price": "99000", "target_price": "102000", "approved": True},
+                position_size="0.01",
+                final_action="dry_run",
+                symbol="BTC/USD",
+                order_kind="entry_market",
+                action_type="entry_evaluation",
+            )
+            self.assertEqual(log.latest_entry_levels("BTCUSD"), ("99000", "102000"))
+            with self.assertRaises(ValueError):
+                log.write(
+                    timestamp=now,
+                    market_context={},
+                    ai_suggestion=None,
+                    risk_verdict="no_trade",
+                    risk_reason="no",
+                    risk_decision={},
+                    position_size=None,
+                    final_action="no_trade",
+                    action_type="guess",
+                )
+        finally:
+            log.close()
+            store_path.unlink(missing_ok=True)
+
     def test_submit_is_only_called_after_the_audit_insert(self) -> None:
         source = Path(__file__).resolve().parent.parent.joinpath("main.py").read_text(encoding="utf-8")
         self.assertEqual(source.count("execution.submit("), 1)

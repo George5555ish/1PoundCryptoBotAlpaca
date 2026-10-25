@@ -20,6 +20,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
 
+import config
+
 
 logger = logging.getLogger("decision_log")
 
@@ -35,6 +37,7 @@ FINAL_ACTIONS = frozenset(
     }
 )
 _FINISH_ACTIONS = frozenset({"submitted", "send_failed"})
+ACTION_TYPES = frozenset({"entry_evaluation", "position_review"})
 
 _CREATE_DECISIONS = """
 CREATE TABLE IF NOT EXISTS decisions (
@@ -51,7 +54,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     order_id TEXT,
     symbol TEXT,
     order_kind TEXT,
-    detail TEXT
+    detail TEXT,
+    action_type TEXT
 )
 """
 
@@ -96,6 +100,7 @@ class DecisionLog:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute(_CREATE_DECISIONS)
+        self._ensure_action_type()
         self._conn.execute(_CREATE_DAY)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp)"
@@ -104,6 +109,13 @@ class DecisionLog:
             "CREATE INDEX IF NOT EXISTS idx_decisions_symbol ON decisions(symbol)"
         )
         self._conn.commit()
+
+    def _ensure_action_type(self) -> None:
+        """Add action_type on a database created before position reviews existed."""
+
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(decisions)")}
+        if "action_type" not in columns:
+            self._conn.execute("ALTER TABLE decisions ADD COLUMN action_type TEXT")
 
     def close(self) -> None:
         with self._lock:
@@ -161,6 +173,7 @@ class DecisionLog:
         symbol: str | None = None,
         order_kind: str | None = None,
         detail: str | None = None,
+        action_type: str | None = None,
     ) -> int:
         """Insert one decision and return its row id.
 
@@ -170,6 +183,8 @@ class DecisionLog:
 
         if final_action not in FINAL_ACTIONS:
             raise ValueError(f"unknown final action {final_action!r}")
+        if action_type is not None and action_type not in ACTION_TYPES:
+            raise ValueError(f"unknown action type {action_type!r}")
         size_text = _size_text(position_size)
         if timestamp.tzinfo is None or timestamp.tzinfo.utcoffset(timestamp) is None:
             raise ValueError("decision timestamp must be timezone-aware")
@@ -183,8 +198,8 @@ class DecisionLog:
                 INSERT INTO decisions (
                     timestamp, recorded_at, market_context_json, ai_suggestion_json,
                     risk_verdict, risk_reason, risk_decision_json, position_size,
-                    final_action, order_id, symbol, order_kind, detail
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    final_action, order_id, symbol, order_kind, detail, action_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp.astimezone(timezone.utc).isoformat(),
@@ -200,14 +215,16 @@ class DecisionLog:
                     symbol,
                     order_kind,
                     detail,
+                    action_type,
                 ),
             )
             self._conn.commit()
             row_id = int(cursor.lastrowid)
         logger.info(
-            "DECISION_RECORD id=%s action=%s symbol=%s size=%s verdict=%s order_id=%s",
+            "DECISION_RECORD id=%s action=%s type=%s symbol=%s size=%s verdict=%s order_id=%s",
             row_id,
             final_action,
+            action_type,
             symbol,
             size_text,
             risk_verdict,
@@ -270,3 +287,40 @@ class DecisionLog:
         payload["ai_suggestion"] = None if suggestion is None else json.loads(suggestion)
         payload["risk_decision"] = json.loads(payload.pop("risk_decision_json"))
         return payload
+
+    def latest_entry_levels(self, symbol: str) -> tuple[str | None, str | None]:
+        """Stop and target from the newest submitted or dry-run entry for a symbol.
+
+        A position opened before this column existed, or with no stored entry,
+        returns ``(None, None)``. The review then cannot use a target or stop
+        and falls through to the trend check.
+        """
+
+        canonical = config.normalize_symbol(symbol)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT risk_decision_json FROM decisions
+                WHERE symbol = ?
+                  AND order_kind = ?
+                  AND final_action IN ('submitted', 'dry_run')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (canonical, "entry_market"),
+            ).fetchone()
+        if row is None:
+            return None, None
+        try:
+            payload = json.loads(row["risk_decision_json"])
+        except Exception:
+            logger.exception("ENTRY_LEVELS unreadable symbol=%s", canonical)
+            return None, None
+        if not isinstance(payload, dict):
+            return None, None
+        stop = payload.get("stop_price")
+        target = payload.get("target_price")
+        return (
+            str(stop) if stop else None,
+            str(target) if target else None,
+        )

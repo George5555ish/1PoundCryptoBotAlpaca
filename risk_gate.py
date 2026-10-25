@@ -11,8 +11,9 @@ Rules enforced here:
 - Symbol on a new entry must be BTC/USD or ETH/USD.
 - The market is 24/7. A weekend or overnight timestamp is not a reason to
   reject. A naive timestamp is.
-- At most one open position in this universe. Another position anywhere in
-  the account, or a working entry while flat, also blocks a new entry.
+- At most five open positions in this universe. A position outside this
+  universe still blocks a new entry. A working buy occupies a slot only for
+  its own symbol. The same symbol cannot be entered again while it is open.
 - Quantity comes from the stop distance. A full stop-out at the stop price,
   after a small slippage allowance, loses no more than 1% of current equity.
   Quantity is floored to 1e-8. Notional is capped at equity and buying power.
@@ -62,6 +63,8 @@ class OpenPosition:
     symbol: str
     qty: Decimal
     side: str = "long"
+    current_price: str | None = None
+    unrealized_pl: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.symbol, str) or not self.symbol.strip():
@@ -115,6 +118,7 @@ class GateRequest:
     other_position_open: bool
     trading_blocked: bool
     now: datetime
+    pending_symbols: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -342,10 +346,21 @@ def _evaluate_entry(request: GateRequest, symbol: str, model_reason: str) -> Ris
         failures.append("reason is empty")
     if request.other_position_open:
         failures.append("another position is already open")
-    if request.pending_entry_while_flat:
-        failures.append("a working entry already occupies the one slot")
-    if len(request.open_positions) >= config.MAX_OPEN_POSITIONS:
-        failures.append("max open positions is 1")
+    held_symbols = {item.symbol for item in request.open_positions}
+    pending = []
+    for raw in request.pending_symbols:
+        pending_symbol = config.normalize_symbol(raw)
+        if pending_symbol not in held_symbols and pending_symbol not in pending:
+            pending.append(pending_symbol)
+    slots = len(held_symbols) + len(pending)
+    if request.pending_entry_while_flat and not pending and not held_symbols:
+        slots += 1
+    if symbol in held_symbols:
+        failures.append("already long this symbol")
+    if symbol in pending:
+        failures.append("a working entry already exists for this symbol")
+    if slots >= config.MAX_OPEN_POSITIONS and symbol not in held_symbols:
+        failures.append(f"max open positions is {config.MAX_OPEN_POSITIONS}")
     if daily_loss_halted(request.equity, request.day_start_equity):
         failures.append("daily loss halt is in effect for this UTC day")
 
@@ -515,12 +530,12 @@ def plan_repairs(
     """Return closes and cancels that bring this universe back inside the rules.
 
     Holds are allowed overnight and on weekends. A repair is only for a book
-    that already breaks a rule: more than one of our longs, a long with no
-    working sell, a stray sell while flat, or extra buy orders that could
-    fill into a second position.
+    that already breaks a rule: more longs than the max, a long with no
+    working sell, a stray sell while flat, or a buy that would add size to
+    an open symbol or push the book past the max.
 
-    The keeper, when two allowed longs are open, is the earlier symbol in
-    ``ALLOWED_SYMBOLS``.
+    When too many allowed longs are open, the earlier symbols in
+    ``ALLOWED_SYMBOLS`` are the ones we keep.
     """
 
     held = {position.symbol: position for position in positions}
@@ -539,22 +554,18 @@ def plan_repairs(
                 )
             )
 
-    if len(held) - len(closing) > config.MAX_OPEN_POSITIONS:
-        keeper = next(
-            symbol for symbol in config.ALLOWED_SYMBOLS if symbol in held and symbol not in closing
-        )
-        for symbol, position in held.items():
-            if symbol == keeper or symbol in closing:
-                continue
-            closing.add(symbol)
-            actions.append(
-                RepairAction(
-                    symbol=symbol,
-                    kind=ORDER_KIND_FULL_CLOSE,
-                    reason="max open positions is 1",
-                    qty=_qty_text(position.qty),
-                )
+    keepers = [symbol for symbol in config.ALLOWED_SYMBOLS if symbol in held and symbol not in closing]
+    for symbol in keepers[config.MAX_OPEN_POSITIONS :]:
+        position = held[symbol]
+        closing.add(symbol)
+        actions.append(
+            RepairAction(
+                symbol=symbol,
+                kind=ORDER_KIND_FULL_CLOSE,
+                reason=f"max open positions is {config.MAX_OPEN_POSITIONS}",
+                qty=_qty_text(position.qty),
             )
+        )
 
     sell_symbols = {order.symbol for order in orders if order.side == "sell"}
     for symbol, position in held.items():
@@ -572,22 +583,50 @@ def plan_repairs(
             )
 
     live = {symbol for symbol in held if symbol not in closing}
-    buy_orders = [order for order in orders if order.side == "buy"]
+    kept_buys: set[str] = set()
     for order in orders:
         if order.symbol in closing:
-            continue
-        stray_sell = order.side == "sell" and order.symbol not in live
-        extra_buy = order.side == "buy" and (bool(live) or len(buy_orders) > 1)
-        if stray_sell or extra_buy:
             actions.append(
                 RepairAction(
                     symbol=order.symbol,
                     kind=ORDER_KIND_CANCEL,
-                    reason="working order would break the one-position rule",
+                    reason="working order belongs to a position being closed",
                     order_id=order.order_id,
                     side=order.side,
                 )
             )
+            continue
+        if order.side == "sell" and order.symbol not in live:
+            actions.append(
+                RepairAction(
+                    symbol=order.symbol,
+                    kind=ORDER_KIND_CANCEL,
+                    reason="working sell has no open long",
+                    order_id=order.order_id,
+                    side=order.side,
+                )
+            )
+            continue
+        if order.side != "buy":
+            continue
+        if order.symbol in live:
+            reason = "working buy would add size to an open long"
+        elif order.symbol in kept_buys:
+            reason = "duplicate working entry for this symbol"
+        elif len(live) + len(kept_buys) >= config.MAX_OPEN_POSITIONS:
+            reason = f"working buy would exceed max open positions of {config.MAX_OPEN_POSITIONS}"
+        else:
+            kept_buys.add(order.symbol)
+            continue
+        actions.append(
+            RepairAction(
+                symbol=order.symbol,
+                kind=ORDER_KIND_CANCEL,
+                reason=reason,
+                order_id=order.order_id,
+                side=order.side,
+            )
+        )
     if actions:
         logger.info(
             "REPAIR_PLAN %s",

@@ -37,11 +37,12 @@ Rules:
 - The soft daily profit target of £1 is awareness only. Never enter a trade in order to reach it.
 - Do not include a quantity, notional, or risk percentage. Those fields are ignored.
 - This market is open 24/7. Overnight and weekend holds are allowed. Do not exit only because the equity market is closed.
-- At most one position may be open. If a position is already open, action must be "hold" or "exit" for that symbol.
+- Up to {config.MAX_OPEN_POSITIONS} positions may be open. Do not enter a symbol that is already long. A different allowed symbol may be entered when its momentum check passes.
+- Do not exit. The process reviews each open long and closes it when the trend is "lower lows" or the stored stop or target is hit. Otherwise that position is held.
 - Short entries are not executable in this version. Prefer hold over a short.
 - Allowed symbols only: {", ".join(config.ALLOWED_SYMBOLS)}.
 
-The user message is one JSON object. It contains the account, the open position, and a "symbols" map. Each symbol has the current bid, ask, and last trade, plus "candle_summary" for up to the last {config.CANDLE_BARS} completed {config.CANDLE_MINUTES}-minute bars:
+The user message is one JSON object. It contains the account, the open positions, and a "symbols" map. Each symbol has the current bid, ask, and last trade, plus "candle_summary" for up to the last {config.CANDLE_BARS} completed {config.CANDLE_MINUTES}-minute bars:
 - bar_count: how many bars were actually returned. This can be less than {config.CANDLE_BARS}.
 - last_close: close of the most recent bar
 - highest_high and lowest_low: extremes across those bars
@@ -52,7 +53,7 @@ If candle_summary.error is set, or bar_count is 0, the candle read failed. Use t
 Each symbol also has "strategy":
 - momentum_pullback.status is "pass" or "fail". reasons explains which checks passed or failed.
 - A long entry is allowed only when momentum_pullback.status is "pass" for that symbol. The checks are: trend is "higher highs", the last close is more than 0.3% below the 30-bar high, and price has pulled back to the range midpoint or the 5-bar average.
-- If status is "fail", or strategy is missing, do not enter. Prefer hold. Exiting an already open position is still allowed.
+- If status is "fail", or strategy is missing, do not enter. Prefer hold.
 - When status is "pass" and you enter, direction must be "long". stop_price must be below pullback_low. You may instead use atr_stop (the last close minus one average true range) when that is the level you are using. The stop must still be below the current ask.
 - target_price must be 1.5 to 2 times the risk distance above the entry. Risk distance is the ask minus stop_price. target_low and target_high are that band measured from the last close with suggested_stop. Recompute the band if you choose a different stop.
 - macd_divergence.status is "present" or "absent". description and price_swing_lows are the swing comparison. Divergence is informational. It can support a long that already passes momentum and pullback. It does not override a failed momentum check, and it is not by itself a reason to enter. Do not invent a divergence when status is "absent".

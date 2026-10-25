@@ -44,7 +44,7 @@ class RiskGateTests(unittest.TestCase):
         self.assertEqual(config.ALLOWED_SYMBOLS, ("BTC/USD", "ETH/USD"))
         self.assertEqual(config.MAX_RISK_FRACTION, Decimal("0.01"))
         self.assertEqual(config.DAILY_LOSS_FRACTION, Decimal("0.03"))
-        self.assertEqual(config.MAX_OPEN_POSITIONS, 1)
+        self.assertEqual(config.MAX_OPEN_POSITIONS, 5)
 
     def test_gate_does_not_read_the_soft_target(self) -> None:
         source = Path(risk_gate.__file__).read_text(encoding="utf-8")
@@ -109,11 +109,33 @@ class RiskGateTests(unittest.TestCase):
         self.assertEqual(decision.order_kind, risk_gate.ORDER_KIND_EXIT)
         self.assertEqual(Decimal(decision.qty or "0"), Decimal("0.5"))
 
-    def test_second_position_is_rejected(self) -> None:
+    def test_second_symbol_is_allowed(self) -> None:
         held = risk_gate.OpenPosition(symbol="ETH/USD", qty=Decimal("1"))
         decision = risk_gate.evaluate(_request(open_positions=(held,)))
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.symbol, "BTC/USD")
+
+    def test_same_symbol_is_not_added_to(self) -> None:
+        held = risk_gate.OpenPosition(symbol="BTC/USD", qty=Decimal("0.01"))
+        decision = risk_gate.evaluate(_request(open_positions=(held,)))
         self.assertFalse(decision.approved)
-        self.assertIn("max open positions", decision.reason)
+        self.assertIn("already long", decision.reason)
+
+    def test_fifth_position_fills_the_book(self) -> None:
+        held = tuple(
+            risk_gate.OpenPosition(symbol=f"X{index}/USD", qty=Decimal("1"))
+            for index in range(5)
+        )
+        decision = risk_gate.evaluate(_request(open_positions=held))
+        self.assertFalse(decision.approved)
+        self.assertIn("max open positions is 5", decision.reason)
+
+    def test_pending_buy_blocks_only_that_symbol(self) -> None:
+        blocked = risk_gate.evaluate(_request(pending_symbols=("BTC/USD",)))
+        allowed = risk_gate.evaluate(_request(symbol="ETH/USD", ask="3000", bid="2999", stop_price="2900", target_price="3300", pending_symbols=("BTC/USD",)))
+        self.assertFalse(blocked.approved)
+        self.assertIn("working entry", blocked.reason)
+        self.assertTrue(allowed.approved)
 
     def test_other_account_position_blocks_entry(self) -> None:
         decision = risk_gate.evaluate(_request(other_position_open=True))
@@ -168,17 +190,32 @@ class RiskGateTests(unittest.TestCase):
             "zero" in decision.reason or "one-dollar" in decision.reason
         )
 
-    def test_repairs_keep_one_protected_long(self) -> None:
+    def test_two_protected_longs_stay_open(self) -> None:
         btc = risk_gate.OpenPosition("BTC/USD", Decimal("0.1"))
         eth = risk_gate.OpenPosition("ETH/USD", Decimal("1"))
         orders = (
             risk_gate.WorkingOrder("s1", "BTC/USD", "sell"),
             risk_gate.WorkingOrder("s2", "ETH/USD", "sell"),
         )
-        actions = risk_gate.plan_repairs((btc, eth), orders)
+        self.assertEqual(risk_gate.plan_repairs((btc, eth), orders), ())
+
+    def test_buy_for_the_other_symbol_is_kept(self) -> None:
+        btc = risk_gate.OpenPosition("BTC/USD", Decimal("0.1"))
+        orders = (
+            risk_gate.WorkingOrder("stop-1", "BTC/USD", "sell"),
+            risk_gate.WorkingOrder("buy-eth", "ETH/USD", "buy"),
+        )
+        self.assertEqual(risk_gate.plan_repairs((btc,), orders), ())
+
+    def test_duplicate_buy_is_cancelled(self) -> None:
+        orders = (
+            risk_gate.WorkingOrder("buy-1", "BTC/USD", "buy"),
+            risk_gate.WorkingOrder("buy-2", "BTC/USD", "buy"),
+        )
+        actions = risk_gate.plan_repairs((), orders)
         self.assertEqual(len(actions), 1)
-        self.assertEqual(actions[0].symbol, "ETH/USD")
-        self.assertEqual(actions[0].kind, risk_gate.ORDER_KIND_FULL_CLOSE)
+        self.assertEqual(actions[0].order_id, "buy-2")
+        self.assertEqual(actions[0].kind, risk_gate.ORDER_KIND_CANCEL)
 
     def test_unprotected_long_is_closed(self) -> None:
         btc = risk_gate.OpenPosition("BTC/USD", Decimal("0.01"))

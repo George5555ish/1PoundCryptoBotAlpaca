@@ -32,13 +32,13 @@ from dotenv import load_dotenv
 
 
 # V1 trades these two pairs and nothing else. The scanner, the prompt, and
-# the gate all share this tuple. Order of the tuple is also the keeper order
-# when the book somehow holds both: the earlier symbol is the one we keep.
+# the gate all share this tuple. If the book ever holds more than the max,
+# the earlier symbol in this tuple is the one we keep.
 ALLOWED_SYMBOLS: tuple[str, ...] = ("BTC/USD", "ETH/USD")
 
-# One open position in this universe. A working entry while flat counts as
-# that slot too. Locked at 1 for V1.
-MAX_OPEN_POSITIONS: int = 1
+# Concurrent longs in this universe. A working buy in a symbol we do not
+# already hold occupies one of these slots. Locked at 5.
+MAX_OPEN_POSITIONS: int = 5
 
 # Daily loss resets on the UTC date, because the crypto market does not close.
 UTC_DAY_NAME = "UTC"
@@ -100,7 +100,7 @@ def _require(condition: bool, message: str) -> None:
         raise RuntimeError(f"invalid risk configuration: {message}")
 
 
-_require(MAX_OPEN_POSITIONS == 1, "V1 allows one open position")
+_require(MAX_OPEN_POSITIONS == 5, "V1 allows five open positions")
 _require(MAX_RISK_FRACTION == Decimal("0.01"), "per-trade risk is 1% of current equity")
 _require(DAILY_LOSS_FRACTION == Decimal("0.03"), "daily loss halt is 3%")
 _require(MAX_POSITION_FRACTION == Decimal("1"), "V1 does not use leverage")
@@ -210,6 +210,12 @@ class Settings:
     loop_interval_seconds: int
     pounds_per_usd: Decimal | None
     n8n_webhook_url: str | None
+    trade_notify_email: str | None
+    smtp_host: str | None
+    smtp_port: int
+    smtp_user: str | None
+    smtp_password: str | None
+    smtp_from: str | None
 
     def __repr__(self) -> str:
         return (
@@ -221,7 +227,10 @@ class Settings:
             f"openai_model={self.openai_model}, "
             f"loop_interval_seconds={self.loop_interval_seconds}, "
             f"pounds_per_usd={self.pounds_per_usd}, "
-            f"n8n_webhook_url={'set' if self.n8n_webhook_url else 'missing'})"
+            f"n8n_webhook_url={'set' if self.n8n_webhook_url else 'missing'}, "
+            f"trade_notify_email={'set' if self.trade_notify_email else 'missing'}, "
+            f"smtp_host={'set' if self.smtp_host else 'missing'}, "
+            f"smtp_password={'set' if self.smtp_password else 'missing'})"
         )
 
 
@@ -281,6 +290,18 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
             raise RuntimeError("POUNDS_PER_USD must be a positive number. It is display-only.")
 
     webhook = source.get("N8N_WEBHOOK_URL", "").strip()
+    trade_email = source.get("TRADE_NOTIFY_EMAIL", "").strip()
+    smtp_host = source.get("SMTP_HOST", "").strip()
+    smtp_user = source.get("SMTP_USER", "").strip()
+    smtp_password = source.get("SMTP_PASSWORD", "").strip()
+    smtp_from = source.get("SMTP_FROM", "").strip()
+    port_raw = source.get("SMTP_PORT", "587").strip() or "587"
+    try:
+        smtp_port = int(port_raw)
+    except ValueError as exc:
+        raise RuntimeError(f"SMTP_PORT must be an integer, got {port_raw!r}") from exc
+    if smtp_port <= 0:
+        raise RuntimeError("SMTP_PORT must be a positive integer.")
 
     return Settings(
         alpaca_api_key=alpaca_key,
@@ -291,4 +312,10 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
         loop_interval_seconds=interval,
         pounds_per_usd=pounds_per_usd,
         n8n_webhook_url=webhook or None,
+        trade_notify_email=trade_email or None,
+        smtp_host=smtp_host or None,
+        smtp_port=smtp_port,
+        smtp_user=smtp_user or None,
+        smtp_password=smtp_password or None,
+        smtp_from=smtp_from or None,
     )

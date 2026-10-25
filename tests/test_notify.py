@@ -116,6 +116,74 @@ class WebhookTests(unittest.TestCase):
         self.assertIn("no pullback", btc["raw_strategy_json"])
         self.assertIn('"action": "hold"', btc["raw_ai_suggestion"])
         self.assertIn('"verdict": "no_trade"', btc["raw_risk_gate"])
+        self.assertEqual(btc["action_type"], "entry_evaluation")
+        self.assertIsNone(btc["event_type"])
+        self.assertIsNone(btc["position_decision"])
+        self.assertIsNone(btc["trade_description"])
+
+    def test_trade_event_is_only_on_the_traded_symbol(self) -> None:
+        when = datetime(2026, 10, 23, 11, 0, tzinfo=timezone.utc)
+        rows = notify.build_rows(
+            timestamp=when,
+            allow_send=True,
+            context={"symbols": {"BTC/USD": {}, "ETH/USD": {}}, "equity": "1", "day_start_equity": "1"},
+            suggestion=None,
+            verdict="approve",
+            reason="entry sized from the stop",
+            approved=True,
+            final_action="submitted",
+            order_id="order-1",
+            chart_filenames=[],
+            symbol="BTC/USD",
+            risk_decision={"verdict": "approve"},
+            action_type="entry_evaluation",
+            trade_symbol="BTC/USD",
+            event_type="trade_opened",
+            trade_side="buy",
+            trade_qty="0.01",
+            trade_price="100000",
+            trade_stop="99000",
+            trade_target="102000",
+            notify_email="trader@example.com",
+        )
+        self.assertEqual(rows[0]["event_type"], "trade_opened")
+        self.assertEqual(rows[0]["trade_side"], "buy")
+        self.assertEqual(rows[0]["trade_qty"], "0.01")
+        self.assertEqual(rows[0]["trade_stop"], "99000")
+        self.assertEqual(
+            rows[0]["trade_description"],
+            "Buy 0.01 of BTC/USD near 100000, stop at 99000, target 102000. entry sized from the stop.",
+        )
+        self.assertIsNone(rows[1]["event_type"])
+        self.assertIsNone(rows[1]["trade_qty"])
+        self.assertIsNone(rows[1]["trade_description"])
+
+    def test_dry_run_entry_still_describes_the_order(self) -> None:
+        when = datetime(2026, 10, 23, 11, 0, tzinfo=timezone.utc)
+        rows = notify.build_rows(
+            timestamp=when,
+            allow_send=False,
+            context={"equity": "1", "day_start_equity": "1"},
+            suggestion={"action": "enter", "reason": "higher highs with a pullback", "symbol": "BTC/USD"},
+            verdict="approve",
+            reason="entry sized from the stop",
+            approved=True,
+            final_action="dry_run",
+            order_id=None,
+            chart_filenames=[],
+            symbol="BTC/USD",
+            risk_decision={
+                "side": "buy",
+                "qty": "0.01",
+                "stop_price": "99000",
+                "target_price": "102000",
+            },
+            action_type="entry_evaluation",
+        )
+        self.assertIn("Buy 0.01 of BTC/USD", rows[0]["trade_description"])
+        self.assertIn("stop at 99000", rows[0]["trade_description"])
+        self.assertIn("dry run", rows[0]["trade_description"])
+        self.assertIn("higher highs with a pullback", rows[0]["trade_description"] or "")
 
     def test_settings_keep_a_blank_webhook_optional_and_mask_it(self) -> None:
         blank = config.load_settings(_settings_environ())
