@@ -15,6 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN mkdir -p /data
 
-# Dry-run unless the platform start command adds --send-orders.
-# Paper host is still required. A live Alpaca URL is refused at startup.
-CMD ["python", "main.py"]
+# Paper orders after the risk gate approves them. Override to
+# python main.py for a dry run. The paper host is still required.
+CMD ["python", "main.py", "--send-orders"]

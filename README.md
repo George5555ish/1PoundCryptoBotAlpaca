@@ -122,9 +122,9 @@ The unit tests do not call Alpaca or a model.
 The image is a long-running worker. It does not listen on a port, so leave the public domain off. Keep the service at one replica. Two copies would both read the same paper account.
 
 1. Push this directory. If the git root is the parent folder, set the Railway service root to `crypto-bot`.
-2. Railway reads `railway.toml` and builds the `Dockerfile`. The start command is `python main.py`, which is a dry run.
+2. Railway reads `railway.toml` and builds the `Dockerfile`. The start command is `python main.py --send-orders`.
 3. Add the variables from `.env.example`: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER=true`, `OPENAI_API_KEY`, `OPENAI_BASE_URL=https://api.x.ai/v1`, `OPENAI_MODEL=grok-4.7`, and optionally `LOOP_INTERVAL_SECONDS`, `POUNDS_PER_USD`, `N8N_WEBHOOK_URL`.
 4. Add a volume mounted at `/data` and set `DATA_DIR=/data`. The database, `bot.log`, and chart PNGs are written there. Without the volume, a redeploy deletes `decisions.db`, including the UTC day-start equity used for the 3% halt.
-5. Confirm the logs show `MODE dry-run` and `DECISION_RECORD` rows. When those look right, change the start command to `python main.py --send-orders`. Startup then says `MODE paper-send`. The client still uses the paper host only.
+5. Confirm the logs show `MODE paper-send`. The sheet `mode` column should then say `live`. Orders still go only to the Alpaca paper host. A dry run uses the start command `python main.py`.
 
 Do not paste `.env` into the image. Railway variables are the secrets. `N8N_WEBHOOK_URL` can stay unset; the cycle logs a warning and continues.
