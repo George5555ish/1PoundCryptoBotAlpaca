@@ -25,6 +25,7 @@ DOWN_COLOR = "#c0392b"
 HIGH_COLOR = "#e67e22"
 LOW_COLOR = "#2471a3"
 DIVERGENCE_COLOR = "#6c3483"
+REJECTION_COLOR = "#922b21"
 
 
 def save_snapshot(
@@ -79,6 +80,7 @@ def save_snapshot(
 
     _mark_swings(axis, candles)
     _mark_divergence(axis, candles, strategy)
+    _mark_rejection(axis, candles, strategy)
     _style(axis, symbol, candles, strategy)
     figure.tight_layout()
     figure.savefig(path, dpi=120)
@@ -186,15 +188,51 @@ def _mark_divergence(axis, candles: list[dict[str, object]], strategy: dict[str,
     )
 
 
+def _mark_rejection(axis, candles: list[dict[str, object]], strategy: dict[str, object]) -> None:
+    rejection = strategy.get("swing_high_rejection") if isinstance(strategy, dict) else None
+    if not isinstance(rejection, dict):
+        momentum = strategy.get("momentum_pullback") if isinstance(strategy, dict) else None
+        rejection = momentum.get("swing_high_rejection") if isinstance(momentum, dict) else None
+    if not isinstance(rejection, dict) or rejection.get("status") != "present":
+        return
+    index = rejection.get("bar_index")
+    price = indicators.decimal_price(rejection.get("price"))
+    if not isinstance(index, int) or price is None or not 0 <= index < len(candles):
+        return
+    axis.scatter(
+        [index],
+        [float(price)],
+        marker="X",
+        color=REJECTION_COLOR,
+        s=48,
+        zorder=5,
+        label="swing-high rejection",
+    )
+    axis.annotate(
+        "rejection",
+        (index, float(price)),
+        textcoords="offset points",
+        xytext=(0, 14),
+        ha="center",
+        color=REJECTION_COLOR,
+        fontsize=8,
+    )
+
+
 def _style(axis, symbol: str, candles: list[dict[str, object]], strategy: dict[str, object]) -> None:
     momentum = strategy.get("momentum_pullback") if isinstance(strategy, dict) else None
     divergence = strategy.get("macd_divergence") if isinstance(strategy, dict) else None
+    rejection = strategy.get("swing_high_rejection") if isinstance(strategy, dict) else None
+    if not isinstance(rejection, dict) and isinstance(momentum, dict):
+        rejection = momentum.get("swing_high_rejection") if isinstance(momentum.get("swing_high_rejection"), dict) else None
     momentum_status = momentum.get("status") if isinstance(momentum, dict) else "unknown"
     divergence_status = divergence.get("status") if isinstance(divergence, dict) else "absent"
+    rejection_status = rejection.get("status") if isinstance(rejection, dict) else "absent"
     trend = momentum.get("trend") if isinstance(momentum, dict) and momentum.get("trend") else "no trend"
     axis.set_title(
         f"{symbol}  {config.CANDLE_MINUTES}-minute candles\n"
-        f"momentum+pullback: {momentum_status} ({trend})   MACD divergence: {divergence_status}"
+        f"momentum+pullback: {momentum_status} ({trend})   MACD divergence: {divergence_status}   "
+        f"swing-high rejection: {rejection_status}"
     )
     axis.set_ylabel("price")
     axis.set_xlim(-1, len(candles))

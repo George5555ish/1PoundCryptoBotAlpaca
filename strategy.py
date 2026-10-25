@@ -6,6 +6,7 @@ A long is eligible only when all three momentum conditions hold on the recent
 - the candle summary trend is "higher highs"
 - the last close is more than 0.5% below the highest high (not extended)
 - price has left that high and reached the range midpoint or the 5-bar average
+- a prominent swing-high rejection needs a clearer pullback before a long is allowed
 
 MACD bullish divergence is reported beside that result. It can support a long
 that already passed. It does not make a failed check pass.
@@ -28,6 +29,15 @@ NOT_EXTENDED_FRACTION = Decimal("0.005")
 SHORT_AVERAGE_BARS = 5
 TARGET_LOW_MULTIPLE = Decimal("1.5")
 TARGET_HIGH_MULTIPLE = Decimal("2")
+# A swing high within this fraction of the 30-bar high counts as prominent.
+PROMINENT_SWING_FRACTION = Decimal("0.015")
+# Upper wick longer than this share of the candle range is a rejection wick.
+REJECTION_WICK_FRACTION = Decimal("0.5")
+# After a rejection, the last close must be this far below that swing, or
+# this far below the 5-bar average, before a long is allowed.
+REJECTION_PULLBACK_FRACTION = Decimal("0.004")
+REJECTION_AVERAGE_FRACTION = Decimal("0.002")
+REJECTION_FAIL_REASON = "prominent swing high rejection — waiting for clearer pullback"
 
 
 def empty_context(reason: str) -> dict[str, object]:
@@ -42,6 +52,7 @@ def empty_context(reason: str) -> dict[str, object]:
             "insufficient_bars": True,
             "price_swing_lows": [],
         },
+        "swing_high_rejection": _empty_rejection(reason),
     }
 
 
@@ -54,9 +65,11 @@ def build_context(summary: dict[str, object], history: list[dict[str, object]]) 
     """
 
     chart = history[-config.CANDLE_BARS :]
+    momentum = evaluate_momentum(summary, chart)
     return {
-        "momentum_pullback": evaluate_momentum(summary, chart),
+        "momentum_pullback": momentum,
         "macd_divergence": evaluate_divergence(history, chart),
+        "swing_high_rejection": momentum.get("swing_high_rejection") or _empty_rejection("rejection was not checked"),
     }
 
 
@@ -86,6 +99,7 @@ def evaluate_momentum(summary: dict[str, object], chart: list[dict[str, object]]
     at_average = short_average is not None and last_close <= short_average
     at_midpoint = last_close <= midpoint
     pullback = (not high_is_latest) and (at_average or at_midpoint)
+    rejection = evaluate_swing_rejection(chart, last_close, short_average, highest)
 
     reasons: list[str] = []
     if trend != "higher highs":
@@ -106,6 +120,13 @@ def evaluate_momentum(summary: dict[str, object], chart: list[dict[str, object]]
             reasons.append("last close is still above the 5-bar average and the range midpoint")
 
     passed = not reasons
+    if (
+        passed
+        and rejection.get("status") == "present"
+        and rejection.get("clearer_pullback") is not True
+    ):
+        reasons.append(REJECTION_FAIL_REASON)
+        passed = False
     if passed:
         pullback_via = []
         if at_average:
@@ -117,6 +138,8 @@ def evaluate_momentum(summary: dict[str, object], chart: list[dict[str, object]]
             f"last close is {_percent(distance)}% below the 30-bar high, outside the 0.5% extension band",
             "pullback: last close is at or below " + " and ".join(pullback_via),
         ]
+        if rejection.get("status") == "present":
+            reasons.append("swing-high rejection is present and the clearer pullback is in place")
 
     suggested_stop = _cent_below(pullback_low) if pullback_low is not None else None
     atr_stop = None
@@ -145,6 +168,92 @@ def evaluate_momentum(summary: dict[str, object], chart: list[dict[str, object]]
         "atr_stop": None if atr_stop is None else format(atr_stop, "f"),
         "target_low": None if target_low is None else format(target_low, "f"),
         "target_high": None if target_high is None else format(target_high, "f"),
+        "swing_high_rejection": rejection,
+    }
+
+
+def evaluate_swing_rejection(
+    chart: list[dict[str, object]],
+    last_close: Decimal | None = None,
+    short_average: Decimal | None = None,
+    window_high: Decimal | None = None,
+) -> dict[str, object]:
+    """Describe the latest prominent swing-high rejection, if there is one.
+
+    Missing or unconfirmed swings are ``absent``. That leaves the existing
+    long rules unchanged. A present rejection never suggests a short.
+    """
+
+    candles = _ohlc_bars(chart)
+    if len(candles) < indicators.SWING_WING * 2 + 1:
+        return _empty_rejection("not enough bars to confirm a swing high")
+
+    highs = [bar["high"] for bar in candles]
+    peak = window_high if window_high is not None else max(highs)
+    indexes = indicators.swing_indexes(highs, kind="high")
+    if not indexes:
+        return _empty_rejection("no confirmed swing high in the recent bars")
+
+    chosen: int | None = None
+    for index in reversed(indexes):
+        if peak > 0 and highs[index] >= peak * (Decimal("1") - PROMINENT_SWING_FRACTION):
+            chosen = index
+            break
+    if chosen is None:
+        return _empty_rejection("latest swing highs are not prominent versus the 30-bar high")
+
+    bar = candles[chosen]
+    swing_high = bar["high"]
+    following = candles[chosen + 1 : chosen + 3]
+    range_size = swing_high - bar["low"]
+    upper_wick = swing_high - max(bar["open"], bar["close"])
+    wick_rejection = range_size > 0 and upper_wick > range_size * REJECTION_WICK_FRACTION
+    close_back = any(item["close"] < swing_high for item in following)
+    if not wick_rejection and not close_back:
+        return {
+            **_empty_rejection(
+                f"swing high {format(swing_high, 'f')} did not show a rejection wick or a close back below it"
+            ),
+            "bar_index": chosen,
+            "price": format(swing_high, "f"),
+            "time": bar["time"],
+        }
+
+    kinds: list[str] = []
+    if wick_rejection:
+        kinds.append("upper wick")
+    if close_back:
+        kinds.append("close back below")
+    kind = " and ".join(kinds)
+    clearer = False
+    if last_close is not None and swing_high > 0:
+        if (swing_high - last_close) / swing_high >= REJECTION_PULLBACK_FRACTION:
+            clearer = True
+    if (
+        not clearer
+        and last_close is not None
+        and short_average is not None
+        and short_average > 0
+        and last_close <= short_average * (Decimal("1") - REJECTION_AVERAGE_FRACTION)
+    ):
+        clearer = True
+
+    if clearer:
+        reason = f"prominent swing high rejection ({kind}) with a clearer pullback"
+    else:
+        reason = (
+            f"prominent swing high rejection ({kind}); "
+            "waiting for a closer pullback of at least 0.4% below that high "
+            "or 0.2% below the 5-bar average"
+        )
+    return {
+        "status": "present",
+        "reason": reason,
+        "bar_index": chosen,
+        "price": format(swing_high, "f"),
+        "time": bar["time"],
+        "kind": kind,
+        "clearer_pullback": clearer,
     }
 
 
@@ -183,19 +292,50 @@ def _momentum_shell(*, status: str, reasons: list[str]) -> dict[str, object]:
         "atr_stop": None,
         "target_low": None,
         "target_high": None,
+        "swing_high_rejection": _empty_rejection(reasons[0] if reasons else "insufficient bars"),
+    }
+
+
+def _empty_rejection(reason: str) -> dict[str, object]:
+    return {
+        "status": "absent",
+        "reason": reason,
+        "bar_index": None,
+        "price": None,
+        "time": None,
+        "kind": None,
+        "clearer_pullback": None,
     }
 
 
 def _parsed_bars(chart: list[dict[str, object]]) -> list[tuple[Decimal, Decimal, Decimal]]:
     parsed: list[tuple[Decimal, Decimal, Decimal]] = []
+    for bar in _ohlc_bars(chart):
+        parsed.append((bar["high"], bar["low"], bar["close"]))
+    return parsed
+
+
+def _ohlc_bars(chart: list[dict[str, object]]) -> list[dict[str, Decimal | str]]:
+    """Usable candles with an open. A missing open falls back to the close."""
+
+    candles: list[dict[str, Decimal | str]] = []
     for bar in chart:
         high = indicators.decimal_price(bar.get("high"))
         low = indicators.decimal_price(bar.get("low"))
         close = indicators.decimal_price(bar.get("close"))
-        if high is None or low is None or close is None or high < low:
+        open_price = indicators.decimal_price(bar.get("open")) or close
+        if high is None or low is None or close is None or open_price is None or high < low:
             continue
-        parsed.append((high, low, close))
-    return parsed
+        candles.append(
+            {
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "time": indicators.bar_time(bar.get("time") or bar.get("timestamp")),
+            }
+        )
+    return candles
 
 
 def _short_average(parsed: list[tuple[Decimal, Decimal, Decimal]]) -> Decimal | None:

@@ -84,6 +84,63 @@ class MomentumTests(unittest.TestCase):
         self.assertEqual(result["status"], "fail")
         self.assertTrue(any("higher highs" in reason for reason in result["reasons"]))
 
+
+def _rejection_window(*, last_close: str) -> list[dict[str, str]]:
+    """Higher highs, a wick rejection at 100, then a close still near that high."""
+
+    earlier = [
+        _bar("94", "93", "93.5"),
+        _bar("95", "93.5", "94.5"),
+        _bar("96", "94", "95.5"),
+        _bar("96.5", "95", "96"),
+        _bar("97", "95.5", "96.5"),
+        _bar("97.5", "96", "97"),
+        _bar("98", "96.5", "97.5"),
+        _bar("98.2", "97", "98"),
+        _bar("98.4", "97.2", "98.1"),
+        _bar("98.5", "97.4", "98.3"),
+    ]
+    later = [
+        _bar("101", "99.5", "100.2", "100.4"),
+        _bar("99.2", "98.8", "99.0"),
+        _bar("99.3", "98.9", "99.1"),
+        _bar("100", "99.0", "99.1", "99.2"),
+        _bar("99.4", "99.0", "99.3"),
+        _bar("99.5", "99.1", "99.8"),
+        _bar("99.6", "99.2", "99.75"),
+        _bar("99.65", "99.3", "99.72"),
+        _bar("99.7", "99.3", "99.71"),
+        _bar("99.8", "99.2", last_close, last_close),
+    ]
+    return earlier + later
+
+
+class RejectionTests(unittest.TestCase):
+    def test_rejection_without_a_clear_pullback_fails_the_long(self) -> None:
+        bars = _rejection_window(last_close="99.70")
+        summary = scanner.summarize_candles(bars)
+        result = strategy.evaluate_momentum(summary, bars)
+        self.assertEqual(summary["trend"], "higher highs")
+        self.assertEqual(result["swing_high_rejection"]["status"], "present")
+        self.assertFalse(result["swing_high_rejection"]["clearer_pullback"])
+        self.assertEqual(result["status"], "fail")
+        self.assertTrue(any("waiting for clearer pullback" in reason for reason in result["reasons"]))
+        context = strategy.build_context(summary, bars)
+        self.assertEqual(context["swing_high_rejection"]["status"], "present")
+
+    def test_rejection_with_a_clearer_pullback_still_allows_the_long(self) -> None:
+        bars = _rejection_window(last_close="99.50")
+        result = strategy.evaluate_momentum(scanner.summarize_candles(bars), bars)
+        self.assertEqual(result["swing_high_rejection"]["status"], "present")
+        self.assertTrue(result["swing_high_rejection"]["clearer_pullback"])
+        self.assertEqual(result["status"], "pass")
+
+    def test_missing_swing_high_leaves_the_existing_rules(self) -> None:
+        bars = _rising_pullback()
+        result = strategy.evaluate_momentum(scanner.summarize_candles(bars), bars)
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["swing_high_rejection"]["status"], "absent")
+
     def test_too_few_bars_fail(self) -> None:
         bars = [_bar("10", "9", "9.5"), _bar("11", "10", "10.5")]
         result = strategy.build_context(scanner.summarize_candles(bars), bars)
@@ -171,6 +228,8 @@ class StrategyLogTests(unittest.TestCase):
     def test_prompt_and_decision_log_receive_strategy_without_bars(self) -> None:
         self.assertIn('momentum_pullback.status is "pass"', ai_decision.SYSTEM_PROMPT)
         self.assertIn("does not override a failed momentum check", ai_decision.SYSTEM_PROMPT)
+        self.assertIn("swing_high_rejection", ai_decision.SYSTEM_PROMPT)
+        self.assertIn("never means a short", ai_decision.SYSTEM_PROMPT)
         view = scanner.SymbolView(
             symbol="BTC/USD",
             bid="100",

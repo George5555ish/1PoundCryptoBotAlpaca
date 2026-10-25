@@ -64,6 +64,10 @@ class WebhookTests(unittest.TestCase):
                 "target_high": None,
             },
             "macd_divergence": {"status": "absent", "description": "No bullish divergence."},
+            "swing_high_rejection": {
+                "status": "present",
+                "reason": "prominent swing high rejection — waiting for clearer pullback",
+            },
         }
         rows = notify.build_rows(
             timestamp=when,
@@ -103,6 +107,8 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(btc["distance_from_high"], "0.001")
         self.assertEqual(btc["macd_divergence_status"], "absent")
         self.assertEqual(btc["macd_divergence_description"], "No bullish divergence.")
+        self.assertEqual(btc["swing_high_rejection_status"], "present")
+        self.assertIn("waiting for clearer pullback", btc["swing_high_rejection_reason"])
         self.assertEqual(btc["ai_action"], "hold")
         self.assertEqual(btc["ai_reason"], "wait")
         self.assertEqual(btc["risk_gate_verdict"], "no_trade")

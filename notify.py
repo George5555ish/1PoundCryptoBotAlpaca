@@ -45,6 +45,8 @@ SHEET_FIELDS = (
     "target_high",
     "macd_divergence_status",
     "macd_divergence_description",
+    "swing_high_rejection_status",
+    "swing_high_rejection_reason",
     "ai_action",
     "ai_reason",
     "ai_symbol",
@@ -313,10 +315,14 @@ def _row(
     strategy = subject.get("strategy")
     momentum = strategy.get("momentum_pullback") if isinstance(strategy, dict) else None
     macd = strategy.get("macd_divergence") if isinstance(strategy, dict) else None
+    rejection = strategy.get("swing_high_rejection") if isinstance(strategy, dict) else None
     if not isinstance(momentum, dict):
         momentum = {}
     if not isinstance(macd, dict):
         macd = {}
+    if not isinstance(rejection, dict):
+        nested = momentum.get("swing_high_rejection")
+        rejection = nested if isinstance(nested, dict) else {}
     reasons = momentum.get("reasons")
     symbol = subject.get("symbol")
     values = {
@@ -334,6 +340,8 @@ def _row(
         "target_high": momentum.get("target_high"),
         "macd_divergence_status": macd.get("status"),
         "macd_divergence_description": macd.get("description"),
+        "swing_high_rejection_status": rejection.get("status"),
+        "swing_high_rejection_reason": rejection.get("reason"),
         "chart_filename": _chart_for(symbol if isinstance(symbol, str) else None, chart_filenames),
         "raw_strategy_json": _json_text(strategy if isinstance(strategy, dict) else None),
         "action_type": action_type,
