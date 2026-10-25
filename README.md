@@ -100,7 +100,7 @@ Each cycle reads the open positions from Alpaca. For each long the process logs 
 - Close when the last price is at or below the stop stored on the original entry, or at or above that entry's target.
 - Otherwise hold.
 
-The entry checks (higher highs, pullback, and not extended) are unchanged. A close still goes through the risk gate. In a dry run the close is logged as `dry_run` and is not sent. A model suggestion to exit a position the review just held is logged as `no_trade`.
+The entry checks are higher highs, a pullback, and a last close more than 0.5% below the 30-bar high. A close still goes through the risk gate. In a dry run the close is logged as `dry_run` and is not sent. A model suggestion to exit a position the review just held is logged as `no_trade`.
 
 ## Trade notifications
 

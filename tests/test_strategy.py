@@ -62,11 +62,11 @@ class MomentumTests(unittest.TestCase):
         result = strategy.evaluate_momentum(scanner.summarize_candles(bars), bars)
         self.assertEqual(result["status"], "fail")
         self.assertTrue(result["extended"])
-        self.assertTrue(any("0.3%" in reason for reason in result["reasons"]))
+        self.assertTrue(any("0.5%" in reason for reason in result["reasons"]))
 
     def test_no_pullback_fails_when_price_is_still_above_the_average(self) -> None:
         bars = _rising_pullback()
-        bars[-1] = _bar("109.6", "109", "109.50")
+        bars[-1] = _bar("109.4", "108.5", "109.40")
         result = strategy.evaluate_momentum(scanner.summarize_candles(bars), bars)
         self.assertEqual(result["status"], "fail")
         self.assertFalse(result["extended"])

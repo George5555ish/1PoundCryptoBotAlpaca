@@ -641,20 +641,74 @@ def plan_repairs(
     return tuple(actions)
 
 
-def same_order(left: RiskDecision, right: RiskDecision) -> bool:
-    """True when a second pass still approves the same order."""
+# A second look may see the quote move by a few cents. That is not a new
+# trade. 0.1% of the price, or five cents, whichever is larger, is the slack.
+SECOND_PASS_PRICE_FRACTION = Decimal("0.001")
+SECOND_PASS_PRICE_CENTS = Decimal("0.05")
 
-    if not left.approved or not right.approved:
+
+def _near_number(left: str | None, right: str | None, *, qty: bool = False) -> bool:
+    """True when two decimal strings are missing together or still close."""
+
+    if left is None and right is None:
+        return True
+    if left is None or right is None:
         return False
-    return (
-        left.symbol == right.symbol
-        and left.side == right.side
-        and left.order_kind == right.order_kind
-        and left.qty == right.qty
-        and left.stop_price == right.stop_price
-        and left.target_price == right.target_price
-        and left.cancel_order_id == right.cancel_order_id
-    )
+    try:
+        first = Decimal(left)
+        second = Decimal(right)
+    except Exception:
+        return left == right
+    if first == second:
+        return True
+    gap = abs(first - second)
+    baseline = max(abs(first), abs(second))
+    if qty:
+        return gap <= config.QTY_QUANTUM or (
+            baseline > 0 and gap / baseline <= SECOND_PASS_PRICE_FRACTION
+        )
+    slack = SECOND_PASS_PRICE_CENTS
+    if baseline > 0:
+        slack = max(slack, baseline * SECOND_PASS_PRICE_FRACTION)
+    return gap <= slack
+
+
+def second_pass_mismatch(first: RiskDecision, second: RiskDecision | None) -> str | None:
+    """Why a second look should abort. ``None`` means send the first order."""
+
+    if second is None:
+        return "second pass did not return an order"
+    if not first.approved:
+        return "first pass is not approved"
+    if not second.approved:
+        return f"second pass rejected the order: {second.reason}"
+    if first.symbol != second.symbol:
+        return f"second pass symbol changed from {first.symbol} to {second.symbol}"
+    if first.side != second.side:
+        return f"second pass side changed from {first.side} to {second.side}"
+    if first.order_kind != second.order_kind:
+        return f"second pass order kind changed from {first.order_kind} to {second.order_kind}"
+    if first.cancel_order_id != second.cancel_order_id:
+        return "second pass cancel order id changed"
+    if not _near_number(first.stop_price, second.stop_price):
+        return f"second pass stop moved from {first.stop_price} to {second.stop_price}"
+    if not _near_number(first.target_price, second.target_price):
+        return f"second pass target moved from {first.target_price} to {second.target_price}"
+    if first.order_kind == ORDER_KIND_ENTRY:
+        return None
+    if not _near_number(first.qty, second.qty, qty=True):
+        return f"second pass quantity changed from {first.qty} to {second.qty}"
+    return None
+
+
+def same_order(left: RiskDecision, right: RiskDecision) -> bool:
+    """True when a second pass still approves the same trade.
+
+    Symbol, side, and order kind must match. Stop, target, and quantity may
+    move by a few cents or 0.1%. A rejected second pass is not the same order.
+    """
+
+    return second_pass_mismatch(left, right) is None
 
 
 def _demo() -> None:

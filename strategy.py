@@ -4,7 +4,7 @@ A long is eligible only when all three momentum conditions hold on the recent
 5-minute window:
 
 - the candle summary trend is "higher highs"
-- the last close is more than 0.3% below the highest high (not extended)
+- the last close is more than 0.5% below the highest high (not extended)
 - price has left that high and reached the range midpoint or the 5-bar average
 
 MACD bullish divergence is reported beside that result. It can support a long
@@ -22,9 +22,9 @@ import config
 import indicators
 
 
-# "Within 0.3% of the high" uses the highest high as the base. A close that
+# "Within 0.5% of the high" uses the highest high as the base. A close that
 # has fallen by this fraction or less is extended, and the long is not eligible.
-NOT_EXTENDED_FRACTION = Decimal("0.003")
+NOT_EXTENDED_FRACTION = Decimal("0.005")
 SHORT_AVERAGE_BARS = 5
 TARGET_LOW_MULTIPLE = Decimal("1.5")
 TARGET_HIGH_MULTIPLE = Decimal("2")
@@ -92,7 +92,7 @@ def evaluate_momentum(summary: dict[str, object], chart: list[dict[str, object]]
         reasons.append(f"trend is {trend}; a long needs higher highs")
     if extended:
         reasons.append(
-            f"last close is within 0.3% of the 30-bar high ({_percent(distance)}% below)"
+            f"last close is within 0.5% of the 30-bar high ({_percent(distance)}% below)"
         )
     if high_is_latest:
         reasons.append("the 30-bar high is the latest bar, so price has not pulled back")
@@ -114,7 +114,7 @@ def evaluate_momentum(summary: dict[str, object], chart: list[dict[str, object]]
             pullback_via.append("the range midpoint")
         reasons = [
             "trend is higher highs",
-            f"last close is {_percent(distance)}% below the 30-bar high, outside the 0.3% extension band",
+            f"last close is {_percent(distance)}% below the 30-bar high, outside the 0.5% extension band",
             "pullback: last close is at or below " + " and ".join(pullback_via),
         ]
 

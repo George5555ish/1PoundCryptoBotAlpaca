@@ -233,12 +233,19 @@ class RiskGateTests(unittest.TestCase):
         self.assertEqual(actions[0].kind, risk_gate.ORDER_KIND_CANCEL)
         self.assertEqual(actions[0].order_id, "stop-1")
 
-    def test_same_order_requires_the_same_quantity(self) -> None:
+    def test_same_order_allows_a_small_quote_move(self) -> None:
         first = risk_gate.evaluate(_request())
         second = risk_gate.evaluate(_request(equity="100000"))
+        drifted = risk_gate.evaluate(_request(stop_price="98950", target_price="102050"))
         changed = risk_gate.evaluate(_request(stop_price="98000"))
+        rejected = risk_gate.evaluate(_request(direction="short", stop_price="101000", target_price="98000"))
         self.assertTrue(risk_gate.same_order(first, second))
+        self.assertTrue(risk_gate.same_order(first, drifted))
+        self.assertIsNone(risk_gate.second_pass_mismatch(first, drifted))
         self.assertFalse(risk_gate.same_order(first, changed))
+        self.assertIn("stop moved", risk_gate.second_pass_mismatch(first, changed) or "")
+        self.assertFalse(risk_gate.same_order(first, rejected))
+        self.assertIn("second pass rejected", risk_gate.second_pass_mismatch(first, rejected) or "")
 
 
 if __name__ == "__main__":

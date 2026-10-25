@@ -11,7 +11,9 @@ Flow, every cycle:
 4. If nothing was closed, ask the model for one suggestion, run the risk
    gate, and log the result before any broker call.
 5. With ``--send-orders``, run the gate a second time on a fresh read. If
-   the approved order changed, store ``send_aborted`` and do not send.
+   the approved order is no longer the same trade (symbol, side, or a
+   material price move), store ``send_aborted`` and do not send. A few
+   cents or under 0.1% on the stop or target is still the same order.
    The default is a dry run, which logs the decision and sends nothing.
 
 Nothing in this file sizes a position. ``execution.submit`` is called from
@@ -344,14 +346,16 @@ def _commit(
         )
         _notify("dry_run", None, decision.reason)
         return
-    if refreshed is None or not risk_gate.same_order(decision, refreshed):
+    mismatch = risk_gate.second_pass_mismatch(decision, refreshed)
+    if mismatch:
+        logger.warning("SEND_ABORTED %s", mismatch)
         detail = None if refreshed is None else refreshed.log_line()
         _store(
             timestamp=now,
             market_context=stored_context,
             ai_suggestion=payload,
             risk_verdict=decision.verdict,
-            risk_reason="second pass did not match the approved order",
+            risk_reason=mismatch,
             risk_decision=risk,
             position_size=decision.qty,
             final_action="send_aborted",
@@ -359,8 +363,23 @@ def _commit(
             order_kind=decision.order_kind,
             detail=detail,
         )
-        _notify("send_aborted", None, "second pass did not match the approved order")
+        _notify("send_aborted", None, mismatch)
         return
+    if refreshed is not None and (
+        refreshed.stop_price != decision.stop_price
+        or refreshed.target_price != decision.target_price
+        or refreshed.qty != decision.qty
+    ):
+        logger.info(
+            "SECOND_PASS using the first approved order after a small quote move symbol=%s stop=%s->%s target=%s->%s qty=%s->%s",
+            decision.symbol,
+            decision.stop_price,
+            refreshed.stop_price,
+            decision.target_price,
+            refreshed.target_price,
+            decision.qty,
+            refreshed.qty,
+        )
 
     row_id = _store(
         timestamp=now,
@@ -375,7 +394,7 @@ def _commit(
         order_kind=decision.order_kind,
     )
     try:
-        result = execution.submit(trading, refreshed, allow_send=True, book=book)
+        result = execution.submit(trading, decision, allow_send=True, book=book)
     except Exception as exc:
         logger.exception("SEND_FAILED id=%s", row_id)
         decisions.complete(row_id, final_action="send_failed", order_id=None, detail=type(exc).__name__)

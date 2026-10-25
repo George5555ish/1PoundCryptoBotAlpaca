@@ -52,7 +52,7 @@ If candle_summary.error is set, or bar_count is 0, the candle read failed. Use t
 
 Each symbol also has "strategy":
 - momentum_pullback.status is "pass" or "fail". reasons explains which checks passed or failed.
-- A long entry is allowed only when momentum_pullback.status is "pass" for that symbol. The checks are: trend is "higher highs", the last close is more than 0.3% below the 30-bar high, and price has pulled back to the range midpoint or the 5-bar average.
+- A long entry is allowed only when momentum_pullback.status is "pass" for that symbol. The checks are: trend is "higher highs", the last close is more than 0.5% below the 30-bar high, and price has pulled back to the range midpoint or the 5-bar average.
 - If status is "fail", or strategy is missing, do not enter. Prefer hold.
 - When status is "pass" and you enter, direction must be "long". stop_price must be below pullback_low. You may instead use atr_stop (the last close minus one average true range) when that is the level you are using. The stop must still be below the current ask.
 - target_price must be 1.5 to 2 times the risk distance above the entry. Risk distance is the ask minus stop_price. target_low and target_high are that band measured from the last close with suggested_stop. Recompute the band if you choose a different stop.
