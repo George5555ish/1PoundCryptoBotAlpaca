@@ -324,3 +324,80 @@ class DecisionLog:
             str(stop) if stop else None,
             str(target) if target else None,
         )
+
+    def stats(self) -> dict[str, object]:
+        """Counts and the newest row for the dashboard. Never touches the broker."""
+
+        with self._lock:
+            total = int(self._conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0])
+            by_action = {
+                str(row["final_action"]): int(row["n"])
+                for row in self._conn.execute(
+                    "SELECT final_action, COUNT(*) AS n FROM decisions GROUP BY final_action"
+                )
+            }
+            latest = self._conn.execute(
+                """
+                SELECT timestamp, symbol, final_action, order_kind, action_type,
+                       risk_verdict, risk_reason, market_context_json
+                FROM decisions
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            recent = self._conn.execute(
+                """
+                SELECT timestamp, symbol, final_action, order_kind, action_type,
+                       risk_reason, order_id
+                FROM decisions
+                ORDER BY id DESC
+                LIMIT 8
+                """
+            ).fetchall()
+        equity = None
+        day_start = None
+        context: dict[str, object] = {}
+        if latest is not None:
+            try:
+                loaded = json.loads(latest["market_context_json"])
+            except Exception:
+                loaded = {}
+            if isinstance(loaded, dict):
+                context = loaded
+                equity = context.get("equity")
+                day_start = context.get("day_start_equity")
+        return {
+            "total": total,
+            "by_action": by_action,
+            "submitted": by_action.get("submitted", 0),
+            "dry_run": by_action.get("dry_run", 0),
+            "no_trade": by_action.get("no_trade", 0),
+            "rejected": by_action.get("rejected", 0),
+            "send_aborted": by_action.get("send_aborted", 0),
+            "send_failed": by_action.get("send_failed", 0),
+            "equity": equity,
+            "day_start_equity": day_start,
+            "latest": None
+            if latest is None
+            else {
+                "timestamp": latest["timestamp"],
+                "symbol": latest["symbol"],
+                "final_action": latest["final_action"],
+                "order_kind": latest["order_kind"],
+                "action_type": latest["action_type"],
+                "risk_verdict": latest["risk_verdict"],
+                "risk_reason": latest["risk_reason"],
+            },
+            "recent": [
+                {
+                    "timestamp": row["timestamp"],
+                    "symbol": row["symbol"],
+                    "final_action": row["final_action"],
+                    "order_kind": row["order_kind"],
+                    "action_type": row["action_type"],
+                    "risk_reason": row["risk_reason"],
+                    "order_id": row["order_id"],
+                }
+                for row in recent
+            ],
+        }

@@ -86,6 +86,10 @@ PAPER_TRADING_BASE_URL = "https://paper-api.alpaca.markets"
 
 DEFAULT_LOOP_INTERVAL_SECONDS = 60
 MIN_LOOP_INTERVAL_SECONDS = 15
+DEFAULT_DASHBOARD_PORT = 8080
+DEFAULT_DASHBOARD_TRADES_WEBHOOK = (
+    "https://zyraloft.oph.st/webhook/10410755-f2e7-4ab8-a19c-18190f025b07/call-agent"
+)
 
 # Candle context for the model. Thirty 5-minute bars is two and a half hours.
 # The fetch window is slightly longer so a bar that is still forming does not
@@ -216,6 +220,8 @@ class Settings:
     smtp_user: str | None
     smtp_password: str | None
     smtp_from: str | None
+    dashboard_trades_webhook: str | None
+    dashboard_port: int
 
     def __repr__(self) -> str:
         return (
@@ -230,7 +236,9 @@ class Settings:
             f"n8n_webhook_url={'set' if self.n8n_webhook_url else 'missing'}, "
             f"trade_notify_email={'set' if self.trade_notify_email else 'missing'}, "
             f"smtp_host={'set' if self.smtp_host else 'missing'}, "
-            f"smtp_password={'set' if self.smtp_password else 'missing'})"
+            f"smtp_password={'set' if self.smtp_password else 'missing'}, "
+            f"dashboard_trades_webhook={'set' if self.dashboard_trades_webhook else 'missing'}, "
+            f"dashboard_port={self.dashboard_port})"
         )
 
 
@@ -303,6 +311,15 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
     if smtp_port <= 0:
         raise RuntimeError("SMTP_PORT must be a positive integer.")
 
+    trades_webhook = source.get("DASHBOARD_TRADES_WEBHOOK", DEFAULT_DASHBOARD_TRADES_WEBHOOK).strip()
+    port_env = source.get("PORT", source.get("DASHBOARD_PORT", str(DEFAULT_DASHBOARD_PORT))).strip()
+    try:
+        dashboard_port = int(port_env or str(DEFAULT_DASHBOARD_PORT))
+    except ValueError as exc:
+        raise RuntimeError(f"PORT must be an integer, got {port_env!r}") from exc
+    if dashboard_port <= 0:
+        raise RuntimeError("PORT must be a positive integer.")
+
     return Settings(
         alpaca_api_key=alpaca_key,
         alpaca_secret_key=alpaca_secret,
@@ -318,4 +335,6 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
         smtp_user=smtp_user or None,
         smtp_password=smtp_password or None,
         smtp_from=smtp_from or None,
+        dashboard_trades_webhook=trades_webhook or None,
+        dashboard_port=dashboard_port,
     )

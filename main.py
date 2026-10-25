@@ -35,6 +35,7 @@ from decimal import Decimal
 import ai_decision
 import charts
 import config
+import dashboard
 import decision_log
 import execution
 import notify
@@ -44,6 +45,7 @@ import scanner
 
 
 logger = logging.getLogger("main")
+SNAPSHOT = dashboard.Snapshot()
 
 
 def configure_logging(log_dir) -> None:
@@ -598,6 +600,22 @@ def run_cycle(trading, data_client, decisions: decision_log.DecisionLog, setting
         account.trading_blocked,
     )
     logger.info("SOFT_TARGET %s", config.format_soft_target_note(pnl, settings.pounds_per_usd))
+    SNAPSHOT.update(
+        as_of=now.isoformat(),
+        mode="paper-send" if allow_send else "dry-run",
+        equity=account.equity,
+        day_start_equity=day_start,
+        day_pnl=format(pnl, "f"),
+        positions=[
+            {
+                "symbol": position.symbol,
+                "qty": format(position.qty, "f"),
+                "unrealized_pl": position.unrealized_pl,
+            }
+            for position in book.positions
+        ],
+        blocked=account.trading_blocked,
+    )
 
     repairs = risk_gate.plan_repairs(book.positions, book.orders)
     if repairs:
@@ -868,6 +886,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("DECISION_LOG %s", exc)
         return 1
     logger.info("DECISION_LOG %s", decisions.path)
+    try:
+        dashboard.start(
+            decisions,
+            SNAPSHOT,
+            settings.dashboard_trades_webhook,
+            settings.dashboard_port,
+        )
+    except Exception:
+        logger.exception("DASHBOARD failed to start")
     try:
         trading = execution.build_trading_client(settings)
         data_client = scanner.build_data_client(settings)

@@ -39,6 +39,11 @@ class DecisionLogTests(unittest.TestCase):
             self.assertEqual(stored["ai_suggestion"]["symbol"], "BTC/USD")
             self.assertIsNone(stored["order_id"])
             log.complete(row_id, final_action="submitted", order_id="order-1", detail="ok")
+            summary = log.stats()
+            self.assertEqual(summary["total"], 1)
+            self.assertEqual(summary["submitted"], 1)
+            self.assertEqual(summary["equity"], "100000.5")
+            self.assertEqual(summary["latest"]["final_action"], "submitted")
             finished = log.get(row_id)
             assert finished is not None
             self.assertEqual(finished["order_id"], "order-1")

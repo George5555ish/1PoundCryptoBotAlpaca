@@ -2,8 +2,8 @@
 # the service root directory to crypto-bot.
 #
 # Paper orders after the risk gate approves them. The client still refuses
-# a live Alpaca host. Run one replica only.
-# A dry run uses: python main.py
+# a live Alpaca host. Run one replica only. The process also serves GET /
+# on PORT for the dashboard. A dry run uses: python main.py
 
 [build]
 builder = "DOCKERFILE"
