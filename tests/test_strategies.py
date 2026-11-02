@@ -131,3 +131,32 @@ class StrategyEngineTests(unittest.TestCase):
         saturday = datetime(2026, 10, 24, 18, 0, tzinfo=timezone.utc)
         self.assertTrue(multi_runner.cash_session_open(monday_open))
         self.assertFalse(multi_runner.cash_session_open(saturday))
+
+    def test_closed_session_idles_until_next_open(self) -> None:
+        from datetime import datetime, timezone
+
+        friday_night = datetime(2026, 10, 23, 21, 0, tzinfo=timezone.utc)  # 17:00 EDT
+        monday_open = datetime(2026, 10, 26, 13, 30, tzinfo=timezone.utc)  # 09:30 EDT
+        self.assertEqual(multi_runner.session_status(friday_night), "closed")
+        self.assertEqual(multi_runner.next_cash_open(friday_night), monday_open)
+        self.assertEqual(
+            multi_runner.cycle_sleep_seconds(friday_night, 300, "closed"),
+            multi_runner.CLOSED_HEARTBEAT_SECONDS,
+        )
+
+    def test_flatten_window_before_the_bell(self) -> None:
+        from datetime import datetime, timezone
+
+        flatten = datetime(2026, 10, 26, 19, 50, tzinfo=timezone.utc)  # 15:50 EDT
+        after_close = datetime(2026, 10, 26, 20, 5, tzinfo=timezone.utc)  # 16:05 EDT
+        self.assertEqual(multi_runner.session_status(flatten), "flatten")
+        self.assertEqual(multi_runner.session_status(after_close), "closed")
+        self.assertEqual(multi_runner.session_status(flatten, broker_open=False), "closed")
+        self.assertEqual(multi_runner.cycle_sleep_seconds(flatten, 300, "flatten"), 300)
+
+    def test_holiday_clock_overrides_the_weekday_calendar(self) -> None:
+        from datetime import datetime, timezone
+
+        thursday_noon = datetime(2026, 11, 26, 17, 0, tzinfo=timezone.utc)  # Thanksgiving
+        self.assertTrue(multi_runner.cash_session_open(thursday_noon))
+        self.assertEqual(multi_runner.session_status(thursday_noon, broker_open=False), "closed")

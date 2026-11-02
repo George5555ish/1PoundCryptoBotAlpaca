@@ -909,11 +909,12 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("STARTUP %s", exc)
             return 1
     logger.info(
-        "RISK_LIMITS max_risk=%s daily_loss=%s max_positions=%s symbols=%s window=24/7 UTC",
+        "RISK_LIMITS max_risk=%s daily_loss=%s max_positions=%s symbols=%s window=%s",
         config.MAX_RISK_FRACTION,
         config.DAILY_LOSS_FRACTION,
         config.MAX_OPEN_POSITIONS,
         ",".join(config.MULTI_STRATEGY_SYMBOLS if args.multi_strategy else config.ALLOWED_SYMBOLS),
+        "US cash 09:30-16:00 America/New_York" if args.multi_strategy else "24/7 UTC",
     )
     if args.multi_strategy:
         logger.info("MULTI_STRATEGY ids=%s", ",".join(strategy_ids or ()))
@@ -947,18 +948,21 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
+            wait = interval
             try:
                 if args.multi_strategy:
                     import multi_runner
 
-                    multi_runner.run_cycle(
+                    summary = multi_runner.run_cycle(
                         trading,
                         data_client,
                         decisions,
                         settings,
                         allow_send=args.send_orders,
                         strategy_ids=strategy_ids,
+                        loop_interval=interval,
                     )
+                    wait = int(summary.get("sleep_seconds") or interval)
                 else:
                     run_cycle(trading, data_client, decisions, settings, allow_send=args.send_orders)
             except KeyboardInterrupt:
@@ -969,7 +973,7 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
             if args.once:
                 return 0
-            time.sleep(interval)
+            time.sleep(wait)
     except KeyboardInterrupt:
         logger.info("STOP keyboard interrupt")
         return 0

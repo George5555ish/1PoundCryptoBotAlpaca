@@ -120,6 +120,12 @@ It scans a configurable list of twenty liquid stocks and ETFs (`SPY`, `QQQ`, `IW
 
 Each cycle runs the enabled rule-based strategies in `strategies/`. No model is used for the decision. The first non-hold per symbol is sent through the same Risk Gate (1% risk, 3% daily loss, max five positions). One open position per symbol. Dry-run is still the default.
 
+US cash hours are 09:30–16:00 America/New_York, weekdays, and the Alpaca clock must not be closed (holidays and early closes count). Stock brackets are DAY orders, so they expire at the bell:
+
+- During the session: scan, enter, and review as usual, every `LOOP_INTERVAL_SECONDS`.
+- Last 15 minutes before the close: no new entries. Open equity positions are flattened.
+- Nights, weekends, and holidays: no scan and no orders. One heartbeat webhook (`session=closed`, `next_open=…`), then sleep until the next open, waking at least every 30 minutes.
+
 ```powershell
 python main.py --once --multi-strategy
 ```
@@ -132,7 +138,7 @@ python main.py --once --multi-strategy --strategies ema_stack_pullback,current_m
 
 Paper orders still need `--send-orders`. Stock entries use a day bracket. Crypto entries stay on the original path.
 
-Each decision row and webhook payload includes `strategy_id`, `symbol`, `action`, `reason`, `stop_price`, `target_price`, `approved`, and `order_id`. The cycle prints `MULTI_SUMMARY scanned=… signals=… approved=… rejected=…`. Charts are drawn for symbols that produce a non-hold signal.
+Each decision row and webhook payload includes `strategy_id`, `symbol`, `action`, `reason`, `stop_price`, `target_price`, `approved`, and `order_id`. The cycle prints `MULTI_SUMMARY scanned=… signals=… approved=… rejected=… session=…`. Charts are drawn for symbols that produce a non-hold signal. A closed-session cycle does not write per-symbol session-closed rows.
 
 ## Tests
 

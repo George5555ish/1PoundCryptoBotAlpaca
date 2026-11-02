@@ -37,6 +37,12 @@ class AccountView:
 
 
 @dataclass(frozen=True)
+class ClockView:
+    timestamp: datetime
+    is_open: bool
+
+
+@dataclass(frozen=True)
 class PositionBook:
     positions: tuple[risk_gate.OpenPosition, ...]
     orders: tuple[risk_gate.WorkingOrder, ...]
@@ -96,6 +102,18 @@ def _dec(value: object) -> Decimal | None:
     if not number.is_finite() or number <= 0:
         return None
     return number
+
+
+def fetch_clock(client) -> ClockView:
+    """Alpaca cash-session clock. Used by the stock tester, not crypto."""
+
+    clock = client.get_clock()
+    stamp = getattr(clock, "timestamp", None)
+    if not isinstance(stamp, datetime):
+        stamp = datetime.now(timezone.utc)
+    elif stamp.tzinfo is None or stamp.tzinfo.utcoffset(stamp) is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return ClockView(timestamp=stamp, is_open=bool(getattr(clock, "is_open", False)))
 
 
 def fetch_account(client) -> AccountView:

@@ -3,15 +3,23 @@
 Each enabled strategy is a pure-Python rule. Enter and exit suggestions go
 through ``risk_gate.evaluate``. Nothing here sizes an order or calls the
 broker. ``main._commit`` is the only path that can send after a log row.
+
+US cash hours are 09:30–16:00 America/New_York, weekdays. Stock brackets are
+DAY orders, so they die at the close. That drives three modes:
+
+- ``open``: scan, enter, and review as usual.
+- ``flatten``: last 15 minutes of the session. No new entries. Close every
+  equity position we still hold.
+- ``closed``: nights, weekends, and holidays. No scan, no entries, no
+  closes. One heartbeat webhook, then sleep until the next open.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
-
-import pandas
+from zoneinfo import ZoneInfo
 
 import ai_decision
 import config
@@ -29,18 +37,81 @@ import equity_scan
 
 logger = logging.getLogger("multi_runner")
 
+MARKET_TZ = ZoneInfo("America/New_York")
+SESSION_OPEN_MINUTES = 9 * 60 + 30
+SESSION_CLOSE_MINUTES = 16 * 60
+FLATTEN_MINUTES_BEFORE_CLOSE = 15
+CLOSED_HEARTBEAT_SECONDS = 1800
+WAKE_BEFORE_OPEN_SECONDS = 30
+
+
+def _aware(now: datetime) -> datetime:
+    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        return now.replace(tzinfo=timezone.utc)
+    return now
+
+
+def _eastern(now: datetime) -> datetime:
+    return _aware(now).astimezone(MARKET_TZ)
+
 
 def cash_session_open(now: datetime) -> bool:
     """Regular US cash hours, 09:30–16:00 America/New_York, weekdays only."""
 
-    stamp = pandas.Timestamp(now)
-    if stamp.tzinfo is None:
-        stamp = stamp.tz_localize("UTC")
-    eastern = stamp.tz_convert("America/New_York")
-    if int(eastern.dayofweek) >= 5:
+    eastern = _eastern(now)
+    if eastern.weekday() >= 5:
         return False
-    minutes = int(eastern.hour) * 60 + int(eastern.minute)
-    return (9 * 60 + 30) <= minutes < (16 * 60)
+    minutes = eastern.hour * 60 + eastern.minute
+    return SESSION_OPEN_MINUTES <= minutes < SESSION_CLOSE_MINUTES
+
+
+def flatten_window(now: datetime) -> bool:
+    """Last 15 minutes of a weekday cash session, before the bell."""
+
+    eastern = _eastern(now)
+    if eastern.weekday() >= 5:
+        return False
+    minutes = eastern.hour * 60 + eastern.minute
+    start = SESSION_CLOSE_MINUTES - FLATTEN_MINUTES_BEFORE_CLOSE
+    return start <= minutes < SESSION_CLOSE_MINUTES
+
+
+def next_cash_open(now: datetime) -> datetime:
+    """Next 09:30 America/New_York on a weekday, in UTC."""
+
+    eastern = _eastern(now)
+    cursor = eastern.replace(hour=9, minute=30, second=0, microsecond=0)
+    if eastern.weekday() >= 5 or eastern >= cursor:
+        cursor = (eastern + timedelta(days=1)).replace(hour=9, minute=30, second=0, microsecond=0)
+        while cursor.weekday() >= 5:
+            cursor = (cursor + timedelta(days=1)).replace(hour=9, minute=30, second=0, microsecond=0)
+    return cursor.astimezone(timezone.utc)
+
+
+def session_status(now: datetime, broker_open: bool | None = None) -> str:
+    """``open``, ``flatten``, or ``closed``.
+
+    A holiday or early close from the broker clock counts as closed even if
+    the weekday calendar still looks like a regular session.
+    """
+
+    if not cash_session_open(now) or broker_open is False:
+        return "closed"
+    if flatten_window(now):
+        return "flatten"
+    return "open"
+
+
+def cycle_sleep_seconds(now: datetime, interval: int, status: str) -> int:
+    """How long the loop should wait after this cycle."""
+
+    wait = max(config.MIN_LOOP_INTERVAL_SECONDS, int(interval))
+    if status != "closed":
+        return wait
+    remaining = int((next_cash_open(now) - _aware(now)).total_seconds()) - WAKE_BEFORE_OPEN_SECONDS
+    if remaining <= 0:
+        return config.MIN_LOOP_INTERVAL_SECONDS
+    return max(config.MIN_LOOP_INTERVAL_SECONDS, min(CLOSED_HEARTBEAT_SECONDS, remaining))
 
 
 def _price_text(value: object) -> str | None:
@@ -122,10 +193,11 @@ def _flush_cycle(
     day_start: str,
     pnl: Decimal,
     allow_send: bool,
-    session: bool,
-    summary: dict[str, int],
+    session: str,
+    summary: dict[str, int | str | None],
     rows: list[dict[str, object]],
     webhook_url: str | None,
+    next_open: datetime | None = None,
 ) -> None:
     """One n8n POST for the whole cycle. SQLite rows are already written."""
 
@@ -138,7 +210,8 @@ def _flush_cycle(
                 "equity": account.equity,
                 "day_start_equity": day_start,
                 "day_pnl": format(pnl, "f"),
-                "session": "open" if session else "closed",
+                "session": session,
+                "next_open": None if next_open is None else next_open.isoformat(),
                 "scanned": summary.get("scanned", 0),
                 "signals": summary.get("signals", 0),
                 "approved": summary.get("approved", 0),
@@ -152,6 +225,14 @@ def _flush_cycle(
         logger.exception("N8N_WEBHOOK failed")
 
 
+def _broker_open(trading) -> bool | None:
+    try:
+        return execution.fetch_clock(trading).is_open
+    except Exception:
+        logger.exception("CLOCK failed")
+        return None
+
+
 def run_cycle(
     trading,
     data_client,
@@ -159,26 +240,31 @@ def run_cycle(
     settings: config.Settings,
     allow_send: bool,
     strategy_ids: tuple[str, ...] | None = None,
-) -> dict[str, int]:
+    loop_interval: int | None = None,
+) -> dict[str, object]:
     """Scan the equity universe and feed the first signal per symbol through the gate."""
 
     enabled = strategies.enabled_ids(strategy_ids)
     now = datetime.now(timezone.utc)
+    interval = loop_interval if loop_interval is not None else settings.loop_interval_seconds
     account = execution.fetch_account(trading)
     day_start = decisions.day_start_equity(now, account.equity)
     book = execution.fetch_book(trading, include_equities=True)
-    session = cash_session_open(now)
+    broker_open = _broker_open(trading)
+    status = session_status(now, broker_open)
+    next_open = next_cash_open(now)
     try:
         pnl = Decimal(account.equity) - Decimal(day_start)
     except Exception:
         pnl = Decimal("0")
     logger.info("MODE %s", "paper-send" if allow_send else "dry-run")
     logger.info(
-        "MULTI_CYCLE equity=%s day_start=%s positions=%s session=%s strategies=%s",
+        "MULTI_CYCLE equity=%s day_start=%s positions=%s session=%s next_open=%s strategies=%s",
         account.equity,
         day_start,
         ",".join(f"{item.symbol}:{item.side}" for item in book.positions) or "flat",
-        "open" if session else "closed",
+        status,
+        next_open.isoformat(),
         ",".join(enabled),
     )
     logger.info("SOFT_TARGET %s", config.format_soft_target_note(pnl, settings.pounds_per_usd))
@@ -200,6 +286,45 @@ def run_cycle(
     )
 
     cycle_rows: list[dict[str, object]] = []
+
+    def finish(summary: dict[str, int]) -> dict[str, object]:
+        payload = {
+            **summary,
+            "session": status,
+            "sleep_seconds": cycle_sleep_seconds(now, interval, status),
+            "next_open": next_open.isoformat() if status == "closed" else None,
+        }
+        logger.info(
+            "MULTI_SUMMARY scanned=%s signals=%s approved=%s rejected=%s session=%s sleep=%s",
+            payload.get("scanned", 0),
+            payload.get("signals", 0),
+            payload.get("approved", 0),
+            payload.get("rejected", 0),
+            status,
+            payload["sleep_seconds"],
+        )
+        _flush_cycle(
+            now=now,
+            account=account,
+            day_start=day_start,
+            pnl=pnl,
+            allow_send=allow_send,
+            session=status,
+            summary=payload,
+            rows=cycle_rows,
+            webhook_url=settings.n8n_webhook_url,
+            next_open=next_open if status == "closed" else None,
+        )
+        return payload
+
+    if status == "closed":
+        logger.info(
+            "SESSION_IDLE next_open=%s positions=%s",
+            next_open.isoformat(),
+            len(book.positions),
+        )
+        return finish({"scanned": 0, "signals": 0, "approved": 0, "rejected": 0})
+
     repairs = risk_gate.plan_repairs(book.positions, book.orders)
     if repairs:
         if account.trading_blocked:
@@ -232,20 +357,7 @@ def run_cycle(
                     post_webhook=False,
                 )
             )
-        summary = {"scanned": 0, "signals": 0, "approved": 0, "rejected": len(repairs)}
-        logger.info("MULTI_SUMMARY %s", summary)
-        _flush_cycle(
-            now=now,
-            account=account,
-            day_start=day_start,
-            pnl=pnl,
-            allow_send=allow_send,
-            session=session,
-            summary=summary,
-            rows=cycle_rows,
-            webhook_url=settings.n8n_webhook_url,
-        )
-        return summary
+        return finish({"scanned": 0, "signals": 0, "approved": 0, "rejected": len(repairs)})
 
     try:
         scan = equity_scan.scan(data_client)
@@ -255,31 +367,45 @@ def run_cycle(
 
     closed_any = False
     for position in book.positions:
+        if status == "flatten" and not config.is_multi_strategy_symbol(position.symbol):
+            continue
         stop, target = decisions.latest_entry_levels(position.symbol)
         view = scan.for_symbol(position.symbol)
-        review = positions.review_position(
-            symbol=position.symbol,
-            qty=format(position.qty, "f"),
-            current_price=position.current_price,
-            unrealized_pl=position.unrealized_pl,
-            trend=bot._trend_for(scan, position.symbol),
-            stop_price=stop,
-            target_price=target,
-            side=position.side,
-        )
-        strategy_exit = None
-        if review.decision != "close" and view is not None:
-            strategy_exit = first_signal(position.symbol, view, enabled, held=True)
-            if strategy_exit is not None and strategy_exit.get("action") == "exit":
-                review = positions.PositionReview(
-                    symbol=position.symbol,
-                    qty=format(position.qty, "f"),
-                    current_price=position.current_price,
-                    unrealized_pl=position.unrealized_pl,
-                    decision="close",
-                    reason=str(strategy_exit.get("reason") or "strategy exit"),
-                    trend=review.trend,
-                )
+        if status == "flatten":
+            review = positions.PositionReview(
+                symbol=position.symbol,
+                qty=format(position.qty, "f"),
+                current_price=position.current_price,
+                unrealized_pl=position.unrealized_pl,
+                decision="close",
+                reason="flatten before the US cash close; DAY brackets expire",
+                trend=bot._trend_for(scan, position.symbol),
+            )
+            strategy_exit = None
+        else:
+            review = positions.review_position(
+                symbol=position.symbol,
+                qty=format(position.qty, "f"),
+                current_price=position.current_price,
+                unrealized_pl=position.unrealized_pl,
+                trend=bot._trend_for(scan, position.symbol),
+                stop_price=stop,
+                target_price=target,
+                side=position.side,
+            )
+            strategy_exit = None
+            if review.decision != "close" and view is not None:
+                strategy_exit = first_signal(position.symbol, view, enabled, held=True)
+                if strategy_exit is not None and strategy_exit.get("action") == "exit":
+                    review = positions.PositionReview(
+                        symbol=position.symbol,
+                        qty=format(position.qty, "f"),
+                        current_price=position.current_price,
+                        unrealized_pl=position.unrealized_pl,
+                        decision="close",
+                        reason=str(strategy_exit.get("reason") or "strategy exit"),
+                        trend=review.trend,
+                    )
         context = bot._position_context(now, account, day_start, book, review, stop, target)
         context["strategy_id"] = None if strategy_exit is None else strategy_exit.get("strategy_id")
         if review.decision != "close":
@@ -343,20 +469,9 @@ def run_cycle(
         )
         closed_any = True
     if closed_any:
-        summary = {"scanned": len(scan.views), "signals": 0, "approved": 1, "rejected": 0}
-        logger.info("MULTI_SUMMARY %s", summary)
-        _flush_cycle(
-            now=now,
-            account=account,
-            day_start=day_start,
-            pnl=pnl,
-            allow_send=allow_send,
-            session=session,
-            summary=summary,
-            rows=cycle_rows,
-            webhook_url=settings.n8n_webhook_url,
-        )
-        return summary
+        return finish({"scanned": len(scan.views), "signals": 0, "approved": 1, "rejected": 0})
+    if status == "flatten":
+        return finish({"scanned": len(scan.views), "signals": 0, "approved": 0, "rejected": 0})
 
     held = {position.symbol for position in book.positions}
     pending = set(book.pending_symbols)
@@ -373,30 +488,12 @@ def run_cycle(
         if payload is None:
             continue
         signals += 1
-        session_blocked = payload.get("action") == "enter" and not session
-        if session_blocked:
-            payload = {
-                **payload,
-                "action": "hold",
-                "reason": f"{payload.get('reason')}; US cash session is closed",
-            }
         suggestion = suggestion_from(symbol, payload)
         context = bot._context(now, account, day_start, book, scanner.ScanResult(views=(view,)), symbol)
         context["strategy_id"] = payload.get("strategy_id")
         context["strategy_action"] = payload.get("action")
         context["strategy_reason"] = payload.get("reason")
-        if session_blocked:
-            decision = risk_gate.RiskDecision(
-                verdict=risk_gate.VERDICT_NO_TRADE,
-                approved=False,
-                reason="US cash session is closed",
-                model_reason=str(payload.get("reason") or ""),
-                symbol=symbol,
-                stop_price=suggestion.stop_price,
-                target_price=suggestion.target_price,
-            )
-        else:
-            decision = risk_gate.evaluate(bot._request_from(suggestion, account, day_start, book, view, now))
+        decision = risk_gate.evaluate(bot._request_from(suggestion, account, day_start, book, view, now))
         if decision.approved:
             approved += 1
         else:
@@ -455,29 +552,11 @@ def run_cycle(
                 pending_symbols=book.pending_symbols,
             )
 
-    summary = {
-        "scanned": len(scan.views),
-        "signals": signals,
-        "approved": approved,
-        "rejected": rejected,
-    }
-    logger.info(
-        "MULTI_SUMMARY scanned=%s signals=%s approved=%s rejected=%s session=%s",
-        summary["scanned"],
-        summary["signals"],
-        summary["approved"],
-        summary["rejected"],
-        "open" if session else "closed",
+    return finish(
+        {
+            "scanned": len(scan.views),
+            "signals": signals,
+            "approved": approved,
+            "rejected": rejected,
+        }
     )
-    _flush_cycle(
-        now=now,
-        account=account,
-        day_start=day_start,
-        pnl=pnl,
-        allow_send=allow_send,
-        session=session,
-        summary=summary,
-        rows=cycle_rows,
-        webhook_url=settings.n8n_webhook_url,
-    )
-    return summary
