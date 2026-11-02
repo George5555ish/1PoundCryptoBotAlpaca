@@ -39,6 +39,9 @@ crypto-bot/
 ├── notify.py
 ├── dashboard.py
 ├── main.py
+├── multi_runner.py
+├── equity_scan.py
+├── strategies/
 ├── requirements.txt
 └── tests/
 ```
@@ -56,7 +59,7 @@ Copy-Item .env.example .env
 
 Put the paper key id in `ALPACA_API_KEY` and the paper secret in `ALPACA_SECRET_KEY`. `ALPACA_PAPER` must stay `true`.
 
-`OPENAI_API_KEY` is the Grok key from the xAI console. It starts with `xai-`. Leave the base URL as `https://api.x.ai/v1` and the model as `grok-4.7`.
+`OPENAI_API_KEY` is an OpenAI key from https://platform.openai.com/api-keys. It starts with `sk-`. Leave the base URL as `https://api.openai.com/v1` and the model as `gpt-4o`. `--multi-strategy` does not call the model; the seven rules decide the trade.
 
 ## Dry run
 
@@ -109,6 +112,28 @@ A submitted entry posts `event_type=trade_opened` on that symbol's webhook row. 
 
 Set `TRADE_NOTIFY_EMAIL` and `SMTP_HOST` to also send that event by email. If the address is set and SMTP is not, the email is skipped and the webhook row is unchanged.
 
+## Multi-strategy paper tester
+
+`--multi-strategy` is an extra mode on this process. The default crypto loop is unchanged.
+
+It scans a configurable list of twenty liquid stocks and ETFs (`SPY`, `QQQ`, `IWM`, `DIA`, `XLK`, `XLF`, `XLE`, `XLV`, `SMH`, `MTUM`, `ARKK`, `AAPL`, `MSFT`, `NVDA`, `TSLA`, `AMZN`, `META`, `GOOGL`, `AMD`, `NFLX`). Add `GLD`, `SLV`, or `USO` to `MULTI_STRATEGY_SYMBOLS` in `config.py` when commodities should be included.
+
+Each cycle runs the enabled rule-based strategies in `strategies/`. No model is used for the decision. The first non-hold per symbol is sent through the same Risk Gate (1% risk, 3% daily loss, max five positions). One open position per symbol. Dry-run is still the default.
+
+```powershell
+python main.py --once --multi-strategy
+```
+
+A subset of strategies:
+
+```powershell
+python main.py --once --multi-strategy --strategies ema_stack_pullback,current_momentum_pullback
+```
+
+Paper orders still need `--send-orders`. Stock entries use a day bracket. Crypto entries stay on the original path.
+
+Each decision row and webhook payload includes `strategy_id`, `symbol`, `action`, `reason`, `stop_price`, `target_price`, `approved`, and `order_id`. The cycle prints `MULTI_SUMMARY scanned=… signals=… approved=… rejected=…`. Charts are drawn for symbols that produce a non-hold signal.
+
 ## Tests
 
 ```powershell
@@ -124,7 +149,7 @@ The image is a long-running worker that also serves a small page on `PORT`. Gene
 
 1. Push this directory. If the git root is the parent folder, set the Railway service root to `crypto-bot`.
 2. Railway reads `railway.toml` and builds the `Dockerfile`. The start command is `python main.py --send-orders`.
-3. Add the variables from `.env.example`: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER=true`, `OPENAI_API_KEY`, `OPENAI_BASE_URL=https://api.x.ai/v1`, `OPENAI_MODEL=grok-4.7`, and optionally `LOOP_INTERVAL_SECONDS`, `POUNDS_PER_USD`, `N8N_WEBHOOK_URL`.
+3. Add the variables from `.env.example`: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER=true`, `OPENAI_API_KEY`, `OPENAI_BASE_URL=https://api.openai.com/v1`, `OPENAI_MODEL=gpt-4o`, and optionally `LOOP_INTERVAL_SECONDS`, `POUNDS_PER_USD`, `N8N_WEBHOOK_URL`.
 4. Add a volume mounted at `/data` and set `DATA_DIR=/data`. The database, `bot.log`, and chart PNGs are written there. Without the volume, a redeploy deletes `decisions.db`, including the UTC day-start equity used for the 3% halt.
 5. Confirm the logs show `MODE paper-send`. The sheet `mode` column should then say `live`. Orders still go only to the Alpaca paper host. A dry run uses the start command `python main.py`.
 6. Open the public URL. `/` is the dashboard (equity, decision counts, last trades). `/api` is the same data as JSON. The last-five trades come from `DASHBOARD_TRADES_WEBHOOK` (default is the n8n call-agent URL). A failed fetch does not stop trading.

@@ -45,26 +45,38 @@ def review_position(
     trend: str | None,
     stop_price: str | None,
     target_price: str | None,
+    side: str = "long",
 ) -> PositionReview:
-    """Decide hold or close for one open long.
+    """Decide hold or close for one open position.
 
-    Close when the last price is at or below the tracked stop, when it has
-    reached the tracked target, or when the candle trend is "lower lows".
-    Anything else is a hold. Missing prices do not invent an exit.
+    Longs close when the last price is at or below the tracked stop, when it
+    has reached the tracked target, or when the candle trend is "lower lows".
+    Shorts invert those prices and close on "higher highs". Missing prices
+    do not invent an exit.
     """
 
     price = _number(current_price)
     stop = _number(stop_price)
     target = _number(target_price)
     trend_text = trend.strip() if isinstance(trend, str) and trend.strip() else None
+    short = side == "short"
 
-    if price is not None and stop is not None and price <= stop:
+    if short and price is not None and stop is not None and price >= stop:
         decision = "close"
-        reason = "price is at or below the protective stop"
-    elif price is not None and target is not None and price >= target:
+        reason = "price is at or above the protective stop"
+    elif short and price is not None and target is not None and price <= target:
         decision = "close"
         reason = "price reached the original target"
-    elif trend_text == "lower lows":
+    elif short and trend_text == "higher highs":
+        decision = "close"
+        reason = "trend flipped against the short"
+    elif not short and price is not None and stop is not None and price <= stop:
+        decision = "close"
+        reason = "price is at or below the protective stop"
+    elif not short and price is not None and target is not None and price >= target:
+        decision = "close"
+        reason = "price reached the original target"
+    elif not short and trend_text == "lower lows":
         decision = "close"
         reason = "trend flipped to lower lows"
     elif trend_text:

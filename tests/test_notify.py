@@ -123,6 +123,10 @@ class WebhookTests(unittest.TestCase):
         self.assertIn('"action": "hold"', btc["raw_ai_suggestion"])
         self.assertIn('"verdict": "no_trade"', btc["raw_risk_gate"])
         self.assertEqual(btc["action_type"], "entry_evaluation")
+        self.assertEqual(btc["action"], "hold")
+        self.assertEqual(btc["reason"], "wait")
+        self.assertFalse(btc["approved"])
+        self.assertIsNone(btc["strategy_id"])
         self.assertIsNone(btc["event_type"])
         self.assertIsNone(btc["position_decision"])
         self.assertIsNone(btc["trade_description"])
@@ -190,6 +194,26 @@ class WebhookTests(unittest.TestCase):
         self.assertIn("stop at 99000", rows[0]["trade_description"])
         self.assertIn("dry run", rows[0]["trade_description"])
         self.assertIn("higher highs with a pullback", rows[0]["trade_description"] or "")
+
+    def test_cycle_posts_strategy_trades_once(self) -> None:
+        response = Mock(ok=True, status_code=200)
+        body = {
+            "event_type": "multi_cycle",
+            "scanned": 20,
+            "signals": 2,
+            "strategy_trades": [
+                {"symbol": "SPY", "strategy_id": "ema_stack_pullback", "action": "hold"},
+                {"symbol": "NVDA", "strategy_id": "vwap_orb_pullback", "action": "hold"},
+            ],
+        }
+        with patch("requests.post", return_value=response) as post:
+            with self.assertLogs("notify", level="INFO"):
+                notify.post_cycle(body, "https://n8n.example/webhook/cycle")
+        post.assert_called_once_with(
+            "https://n8n.example/webhook/cycle",
+            json=body,
+            timeout=10,
+        )
 
     def test_settings_keep_a_blank_webhook_optional_and_mask_it(self) -> None:
         blank = config.load_settings(_settings_environ())

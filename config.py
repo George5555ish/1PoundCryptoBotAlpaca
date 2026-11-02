@@ -36,6 +36,42 @@ from dotenv import load_dotenv
 # the earlier symbol in this tuple is the one we keep.
 ALLOWED_SYMBOLS: tuple[str, ...] = ("BTC/USD", "ETH/USD")
 
+# Equity universe for ``--multi-strategy``. One open position per symbol.
+# Append GLD, SLV, USO here when commodities should be tested.
+MULTI_STRATEGY_SYMBOLS: tuple[str, ...] = (
+    "SPY",
+    "QQQ",
+    "IWM",
+    "DIA",
+    "XLK",
+    "XLF",
+    "XLE",
+    "XLV",
+    "SMH",
+    "MTUM",
+    "ARKK",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "TSLA",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "AMD",
+    "NFLX",
+)
+COMMODITY_SYMBOLS: tuple[str, ...] = ("GLD", "SLV", "USO")
+MULTI_STRATEGY_IDS: tuple[str, ...] = (
+    "ema_stack_pullback",
+    "vwap_orb_pullback",
+    "vwap_squeeze_breakout",
+    "anchored_vwap_mean_reversion",
+    "long_horizon_momentum",
+    "mtf_ema_vwap_reclaim",
+    "current_momentum_pullback",
+)
+EQUITY_QTY_QUANTUM = Decimal("0.01")
+
 # Concurrent longs in this universe. A working buy in a symbol we do not
 # already hold occupies one of these slots. Locked at 5.
 MAX_OPEN_POSITIONS: int = 5
@@ -84,8 +120,10 @@ SOFT_DAILY_PROFIT_TARGET_GBP = Decimal("1")
 
 PAPER_TRADING_BASE_URL = "https://paper-api.alpaca.markets"
 
-DEFAULT_LOOP_INTERVAL_SECONDS = 60
+DEFAULT_LOOP_INTERVAL_SECONDS = 300
 MIN_LOOP_INTERVAL_SECONDS = 15
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENAI_MODEL = "gpt-4o"
 DEFAULT_DASHBOARD_PORT = 8080
 DEFAULT_DASHBOARD_TRADES_WEBHOOK = (
     "https://zyraloft.oph.st/webhook/10410755-f2e7-4ab8-a19c-18190f025b07/call-agent"
@@ -114,6 +152,11 @@ _require(Decimal("0") < MAX_SPREAD_FRACTION < Decimal("0.01"), "spread fraction"
 _require(MIN_NOTIONAL_USD == Decimal("1"), "minimum notional is one dollar")
 _require(SOFT_DAILY_PROFIT_TARGET_GBP == Decimal("1"), "soft target is £1")
 _require(ALLOWED_SYMBOLS == ("BTC/USD", "ETH/USD"), "universe is BTC/USD and ETH/USD")
+_require(len(MULTI_STRATEGY_SYMBOLS) == 20, "multi-strategy universe is twenty symbols")
+_require(len(set(MULTI_STRATEGY_SYMBOLS)) == len(MULTI_STRATEGY_SYMBOLS), "multi-strategy symbols must be unique")
+_require(not (set(ALLOWED_SYMBOLS) & set(MULTI_STRATEGY_SYMBOLS)), "crypto and equity universes stay separate")
+_require(len(MULTI_STRATEGY_IDS) == 7, "seven paper strategies")
+_require(len(set(MULTI_STRATEGY_IDS)) == len(MULTI_STRATEGY_IDS), "strategy ids must be unique")
 
 
 def normalize_symbol(value: str) -> str:
@@ -132,6 +175,16 @@ def normalize_symbol(value: str) -> str:
 
 def is_allowed_symbol(value: str) -> bool:
     return normalize_symbol(value) in ALLOWED_SYMBOLS
+
+
+def is_multi_strategy_symbol(value: str) -> bool:
+    return normalize_symbol(value) in MULTI_STRATEGY_SYMBOLS
+
+
+def is_managed_symbol(value: str) -> bool:
+    """Crypto pairs plus the multi-strategy equity list."""
+
+    return is_allowed_symbol(value) or is_multi_strategy_symbol(value)
 
 
 def require_interval(seconds: int) -> int:
@@ -242,7 +295,7 @@ class Settings:
         )
 
 
-def load_settings(environ: dict[str, str] | None = None) -> Settings:
+def load_settings(environ: dict[str, str] | None = None, *, require_model_key: bool = True) -> Settings:
     """Load paper credentials and the model endpoint.
 
     ``ALPACA_PAPER`` must be true. A live flag aborts before a client exists.
@@ -268,14 +321,14 @@ def load_settings(environ: dict[str, str] | None = None) -> Settings:
     openai_key = source.get("OPENAI_API_KEY", "").strip()
     if not alpaca_key or not alpaca_secret:
         raise RuntimeError("ALPACA_API_KEY and ALPACA_SECRET_KEY are required. Use paper-trading keys.")
-    if not openai_key:
-        raise RuntimeError("OPENAI_API_KEY is required. The model suggests trades; it does not size or send them.")
+    if require_model_key and not openai_key:
+        raise RuntimeError("OPENAI_API_KEY is required. Use a secret from https://platform.openai.com/api-keys.")
 
-    base_url = source.get("OPENAI_BASE_URL", "https://api.x.ai/v1").strip().rstrip("/")
+    base_url = source.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL).strip().rstrip("/")
     if not base_url.startswith("https://"):
         raise RuntimeError("OPENAI_BASE_URL must be an https URL.")
 
-    model = source.get("OPENAI_MODEL", "grok-4.7").strip()
+    model = source.get("OPENAI_MODEL", DEFAULT_OPENAI_MODEL).strip()
     if not model:
         raise RuntimeError("OPENAI_MODEL cannot be empty.")
 

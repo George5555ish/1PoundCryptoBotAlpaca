@@ -72,7 +72,9 @@ class OpenPosition:
         object.__setattr__(self, "symbol", config.normalize_symbol(self.symbol))
         if not isinstance(self.qty, Decimal) or not self.qty.is_finite() or self.qty <= 0:
             raise ValueError("position qty must be a positive Decimal")
-        if self.side != "long":
+        if self.side not in {"long", "short"}:
+            raise ValueError("position side must be long or short")
+        if self.side == "short" and config.is_allowed_symbol(self.symbol):
             raise ValueError("crypto V1 positions are long only")
 
 
@@ -298,7 +300,7 @@ def _position_for(symbol: str, positions: tuple[OpenPosition, ...]) -> OpenPosit
 
 
 def _evaluate_exit(request: GateRequest, symbol: str, model_reason: str) -> RiskDecision:
-    if request.direction not in {None, "long", "sell"}:
+    if config.is_allowed_symbol(symbol) and request.direction not in {None, "long", "sell"}:
         return _reject(
             "exit direction conflicts with the long-only book",
             model_reason=model_reason,
@@ -318,13 +320,14 @@ def _evaluate_exit(request: GateRequest, symbol: str, model_reason: str) -> Risk
             symbol=symbol,
         )
     position = matches[0]
+    close_side = "buy" if position.side == "short" else "sell"
     decision = RiskDecision(
         verdict=VERDICT_APPROVE,
         approved=True,
-        reason="close the open long",
+        reason="close the open position",
         model_reason=model_reason,
         symbol=symbol,
-        side="sell",
+        side=close_side,
         qty=_qty_text(position.qty),
         order_kind=ORDER_KIND_EXIT,
     )
@@ -334,9 +337,15 @@ def _evaluate_exit(request: GateRequest, symbol: str, model_reason: str) -> Risk
 
 def _evaluate_entry(request: GateRequest, symbol: str, model_reason: str) -> RiskDecision:
     failures: list[str] = []
-    if request.direction != "long":
+    equity_symbol = config.is_multi_strategy_symbol(symbol)
+    crypto_symbol = config.is_allowed_symbol(symbol)
+    if request.direction != "long" and crypto_symbol:
         failures.append("crypto V1 is long only")
-    if not config.is_allowed_symbol(symbol):
+    if request.direction not in {"long", "short"} and equity_symbol:
+        failures.append("direction must be long or short")
+    if request.direction == "short" and not equity_symbol:
+        failures.append("crypto V1 is long only")
+    if not crypto_symbol and not equity_symbol:
         failures.append("symbol is not in the crypto universe")
     if request.trading_blocked:
         failures.append("trading is blocked at the broker")
@@ -356,7 +365,7 @@ def _evaluate_entry(request: GateRequest, symbol: str, model_reason: str) -> Ris
     if request.pending_entry_while_flat and not pending and not held_symbols:
         slots += 1
     if symbol in held_symbols:
-        failures.append("already long this symbol")
+        failures.append("already have this symbol")
     if symbol in pending:
         failures.append("a working entry already exists for this symbol")
     if slots >= config.MAX_OPEN_POSITIONS and symbol not in held_symbols:
@@ -383,14 +392,23 @@ def _evaluate_entry(request: GateRequest, symbol: str, model_reason: str) -> Ris
     except _BadNumber as exc:
         failures.append(str(exc))
 
+    short = request.direction == "short" and equity_symbol
     if ask is not None and stop is not None:
         min_distance = max(config.CENT, (ask * config.MIN_STOP_FRACTION).quantize(config.CENT, rounding=ROUND_UP))
-        if stop >= ask:
+        if short:
+            if stop <= ask:
+                failures.append("stop must be above the ask for a short")
+            elif stop - ask < min_distance:
+                failures.append("stop is closer than the minimum distance")
+        elif stop >= ask:
             failures.append("stop must be below the ask")
         elif ask - stop < min_distance:
             failures.append("stop is closer than the minimum distance")
-    if ask is not None and target is not None and target <= ask:
-        failures.append("target must be above the ask")
+    if ask is not None and target is not None:
+        if short and target >= ask:
+            failures.append("target must be below the ask for a short")
+        elif not short and target <= ask:
+            failures.append("target must be above the ask")
 
     if failures or ask is None or stop is None or target is None:
         reason = "; ".join(failures) if failures else "entry is incomplete"
@@ -403,15 +421,16 @@ def _evaluate_entry(request: GateRequest, symbol: str, model_reason: str) -> Ris
         return _reject(str(exc), model_reason=model_reason, symbol=symbol)
 
     budget = (equity * config.MAX_RISK_FRACTION).quantize(config.CENT, rounding=ROUND_DOWN)
-    stop_distance = ask - stop
+    stop_distance = (stop - ask) if short else (ask - stop)
     slippage = max(
         config.CENT,
         (ask * config.SLIPPAGE_ALLOWANCE_FRACTION).quantize(config.CENT, rounding=ROUND_UP),
     )
     sizing_distance = stop_distance + slippage
-    raw_qty = (budget / sizing_distance).quantize(config.QTY_QUANTUM, rounding=ROUND_DOWN)
+    quantum = config.EQUITY_QTY_QUANTUM if equity_symbol else config.QTY_QUANTUM
+    raw_qty = (budget / sizing_distance).quantize(quantum, rounding=ROUND_DOWN)
     max_notional = min(equity, buying_power) * config.MAX_POSITION_FRACTION
-    max_qty = (max_notional / ask).quantize(config.QTY_QUANTUM, rounding=ROUND_DOWN)
+    max_qty = (max_notional / ask).quantize(quantum, rounding=ROUND_DOWN)
     size_capped = False
     qty = raw_qty
     if qty > max_qty:
@@ -445,7 +464,7 @@ def _evaluate_entry(request: GateRequest, symbol: str, model_reason: str) -> Ris
         reason="entry sized from the stop" + ("; size capped by equity" if size_capped else ""),
         model_reason=model_reason,
         symbol=symbol,
-        side="buy",
+        side="sell" if short else "buy",
         qty=_qty_text(qty),
         stop_price=_price_text(stop),
         target_price=_price_text(target),
@@ -475,7 +494,7 @@ def evaluate(request: GateRequest) -> RiskDecision:
         return _no_trade("hold", model_reason, symbol)
 
     if action == "exit":
-        if symbol is None or not config.is_allowed_symbol(symbol):
+        if symbol is None or not config.is_managed_symbol(symbol):
             return _reject("exit symbol is not in the crypto universe", model_reason=model_reason, symbol=symbol)
         if not model_reason:
             return _reject("reason is empty", model_reason=model_reason, symbol=symbol)
@@ -488,17 +507,18 @@ def evaluate(request: GateRequest) -> RiskDecision:
     return _evaluate_entry(request, symbol, model_reason)
 
 
-def approve_full_close(symbol: str, qty: Decimal, reason: str) -> RiskDecision:
-    """Approve closing one long without asking the model."""
+def approve_full_close(symbol: str, qty: Decimal, reason: str, side: str = "sell") -> RiskDecision:
+    """Approve closing one position without asking the model."""
 
     canonical = config.normalize_symbol(symbol)
+    close_side = side if side in {"buy", "sell"} else "sell"
     decision = RiskDecision(
         verdict=VERDICT_APPROVE,
         approved=True,
         reason=reason,
         model_reason="",
         symbol=canonical,
-        side="sell",
+        side=close_side,
         qty=_qty_text(qty),
         order_kind=ORDER_KIND_FULL_CLOSE,
     )
@@ -543,7 +563,7 @@ def plan_repairs(
     closing: set[str] = set()
 
     for symbol, position in held.items():
-        if symbol not in config.ALLOWED_SYMBOLS:
+        if not config.is_managed_symbol(symbol):
             closing.add(symbol)
             actions.append(
                 RepairAction(
@@ -554,7 +574,11 @@ def plan_repairs(
                 )
             )
 
-    keepers = [symbol for symbol in config.ALLOWED_SYMBOLS if symbol in held and symbol not in closing]
+    keepers = [
+        symbol
+        for symbol in config.ALLOWED_SYMBOLS + config.MULTI_STRATEGY_SYMBOLS
+        if symbol in held and symbol not in closing
+    ]
     for symbol in keepers[config.MAX_OPEN_POSITIONS :]:
         position = held[symbol]
         closing.add(symbol)
@@ -568,8 +592,21 @@ def plan_repairs(
         )
 
     sell_symbols = {order.symbol for order in orders if order.side == "sell"}
+    buy_symbols = {order.symbol for order in orders if order.side == "buy"}
     for symbol, position in held.items():
         if symbol in closing:
+            continue
+        if position.side == "short":
+            if symbol not in buy_symbols:
+                closing.add(symbol)
+                actions.append(
+                    RepairAction(
+                        symbol=symbol,
+                        kind=ORDER_KIND_FULL_CLOSE,
+                        reason="open short has no protective buy order",
+                        qty=_qty_text(position.qty),
+                    )
+                )
             continue
         if symbol not in sell_symbols:
             closing.add(symbol)
@@ -583,7 +620,7 @@ def plan_repairs(
             )
 
     live = {symbol for symbol in held if symbol not in closing}
-    kept_buys: set[str] = set()
+    kept_entries: set[str] = set()
     for order in orders:
         if order.symbol in closing:
             actions.append(
@@ -597,6 +634,24 @@ def plan_repairs(
             )
             continue
         if order.side == "sell" and order.symbol not in live:
+            if config.is_multi_strategy_symbol(order.symbol):
+                if order.symbol in kept_entries:
+                    reason = "duplicate working entry for this symbol"
+                elif len(live) + len(kept_entries) >= config.MAX_OPEN_POSITIONS:
+                    reason = f"working sell would exceed max open positions of {config.MAX_OPEN_POSITIONS}"
+                else:
+                    kept_entries.add(order.symbol)
+                    continue
+                actions.append(
+                    RepairAction(
+                        symbol=order.symbol,
+                        kind=ORDER_KIND_CANCEL,
+                        reason=reason,
+                        order_id=order.order_id,
+                        side=order.side,
+                    )
+                )
+                continue
             actions.append(
                 RepairAction(
                     symbol=order.symbol,
@@ -610,13 +665,15 @@ def plan_repairs(
         if order.side != "buy":
             continue
         if order.symbol in live:
+            if held[order.symbol].side == "short":
+                continue
             reason = "working buy would add size to an open long"
-        elif order.symbol in kept_buys:
+        elif order.symbol in kept_entries:
             reason = "duplicate working entry for this symbol"
-        elif len(live) + len(kept_buys) >= config.MAX_OPEN_POSITIONS:
+        elif len(live) + len(kept_entries) >= config.MAX_OPEN_POSITIONS:
             reason = f"working buy would exceed max open positions of {config.MAX_OPEN_POSITIONS}"
         else:
-            kept_buys.add(order.symbol)
+            kept_entries.add(order.symbol)
             continue
         actions.append(
             RepairAction(

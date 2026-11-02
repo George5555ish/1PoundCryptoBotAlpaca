@@ -39,6 +39,7 @@ class SymbolView:
     candle_summary: dict[str, object]
     strategy: dict[str, object]
     chart_bars: tuple[dict[str, str], ...] = ()
+    eval_bars: tuple[dict[str, object], ...] = ()
     error: str | None = None
 
 

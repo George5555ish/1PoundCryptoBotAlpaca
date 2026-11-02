@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     symbol TEXT,
     order_kind TEXT,
     detail TEXT,
-    action_type TEXT
+    action_type TEXT,
+    strategy_id TEXT
 )
 """
 
@@ -101,6 +102,7 @@ class DecisionLog:
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute(_CREATE_DECISIONS)
         self._ensure_action_type()
+        self._ensure_strategy_id()
         self._conn.execute(_CREATE_DAY)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp)"
@@ -116,6 +118,13 @@ class DecisionLog:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(decisions)")}
         if "action_type" not in columns:
             self._conn.execute("ALTER TABLE decisions ADD COLUMN action_type TEXT")
+
+    def _ensure_strategy_id(self) -> None:
+        """Add strategy_id on a database created before the multi-strategy tester."""
+
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(decisions)")}
+        if "strategy_id" not in columns:
+            self._conn.execute("ALTER TABLE decisions ADD COLUMN strategy_id TEXT")
 
     def close(self) -> None:
         with self._lock:
@@ -174,6 +183,7 @@ class DecisionLog:
         order_kind: str | None = None,
         detail: str | None = None,
         action_type: str | None = None,
+        strategy_id: str | None = None,
     ) -> int:
         """Insert one decision and return its row id.
 
@@ -185,6 +195,9 @@ class DecisionLog:
             raise ValueError(f"unknown final action {final_action!r}")
         if action_type is not None and action_type not in ACTION_TYPES:
             raise ValueError(f"unknown action type {action_type!r}")
+        if strategy_id is None and isinstance(market_context, Mapping):
+            raw = market_context.get("strategy_id")
+            strategy_id = raw.strip() if isinstance(raw, str) and raw.strip() else None
         size_text = _size_text(position_size)
         if timestamp.tzinfo is None or timestamp.tzinfo.utcoffset(timestamp) is None:
             raise ValueError("decision timestamp must be timezone-aware")
@@ -198,8 +211,8 @@ class DecisionLog:
                 INSERT INTO decisions (
                     timestamp, recorded_at, market_context_json, ai_suggestion_json,
                     risk_verdict, risk_reason, risk_decision_json, position_size,
-                    final_action, order_id, symbol, order_kind, detail, action_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    final_action, order_id, symbol, order_kind, detail, action_type, strategy_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp.astimezone(timezone.utc).isoformat(),
@@ -216,6 +229,7 @@ class DecisionLog:
                     order_kind,
                     detail,
                     action_type,
+                    strategy_id,
                 ),
             )
             self._conn.commit()

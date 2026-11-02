@@ -33,6 +33,12 @@ SHEET_FIELDS = (
     "day_start_equity",
     "day_pnl",
     "symbol",
+    "strategy_id",
+    "action",
+    "reason",
+    "stop_price",
+    "target_price",
+    "approved",
     "trend",
     "momentum_status",
     "momentum_reasons",
@@ -99,6 +105,25 @@ def post_rows(rows: list[dict[str, object]], webhook_url: str | None) -> None:
         _post(url, row)
 
 
+def post_cycle(payload: Mapping[str, object], webhook_url: str | None) -> None:
+    """POST one multi-strategy cycle as a single JSON object.
+
+    ``strategy_trades`` is the list of the same flat sheet rows the crypto
+    path would have sent one-by-one. n8n should Split Out that array, append
+    every item to the master sheet, then Switch on ``strategy_id``.
+    """
+
+    url = (webhook_url or "").strip()
+    if not url:
+        logger.warning("N8N_WEBHOOK skip N8N_WEBHOOK_URL is not set")
+        return
+    body = dict(payload)
+    trades = body.get("strategy_trades")
+    count = len(trades) if isinstance(trades, list) else 0
+    logger.info("N8N_WEBHOOK cycle rows=%s", count)
+    _post(url, body)
+
+
 def build_rows(
     *,
     timestamp: datetime,
@@ -143,6 +168,12 @@ def build_rows(
         "equity": context.get("equity"),
         "day_start_equity": context.get("day_start_equity"),
         "day_pnl": _day_pnl(context),
+        "strategy_id": context.get("strategy_id") or _suggestion_field(suggestion, "strategy_id"),
+        "action": _suggestion_field(suggestion, "action") or context.get("strategy_action"),
+        "reason": _suggestion_field(suggestion, "reason") or context.get("strategy_reason") or reason,
+        "stop_price": _suggestion_field(suggestion, "stop_price"),
+        "target_price": _suggestion_field(suggestion, "target_price"),
+        "approved": approved,
         "ai_action": _suggestion_field(suggestion, "action"),
         "ai_reason": _suggestion_field(suggestion, "reason"),
         "ai_symbol": _suggestion_field(suggestion, "symbol"),

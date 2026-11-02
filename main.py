@@ -251,23 +251,34 @@ def _commit(
     position_price: str | None = None,
     unrealized_pl: str | None = None,
     settings: config.Settings | None = None,
-) -> None:
+    post_webhook: bool = True,
+) -> list[dict[str, object]]:
     """Write the audit row, draw the charts, then send only after an awaiting-send row.
 
     The n8n POST runs after the charts and after the final action is known.
     A webhook or email failure is logged and does not change this function's
     control flow. ``--send-orders`` is what sets ``allow_send``. Without it
-    the row is ``dry_run`` and nothing is sent.
+    the row is ``dry_run`` and nothing is sent. ``post_webhook`` false still
+    builds the sheet rows and returns them so a caller can POST once per cycle.
     """
 
     payload = None if suggestion is None else _suggestion_payload(suggestion)
+    if payload is not None and context.get("strategy_id"):
+        payload["strategy_id"] = context.get("strategy_id")
     risk = _risk_payload(decision)
     saved_charts: list[str] = []
     stored_context = dict(context)
     stored_context["action_type"] = action_type
+    if context.get("strategy_id"):
+        stored_context["strategy_id"] = context.get("strategy_id")
+    sheet_rows: list[dict[str, object]] = []
 
     def _store(**kwargs) -> int:
-        row_id = decisions.write(**kwargs, action_type=action_type)
+        row_id = decisions.write(
+            **kwargs,
+            action_type=action_type,
+            strategy_id=None if stored_context.get("strategy_id") is None else str(stored_context.get("strategy_id")),
+        )
         saved_charts.extend(_save_charts(scan, now))
         return row_id
 
@@ -302,7 +313,9 @@ def _commit(
                 trade_description=_trade_text(trade, "description"),
                 notify_email=None if trade is None or settings is None else settings.trade_notify_email,
             )
-            notify.post_rows(rows, webhook_url)
+            sheet_rows.extend(rows)
+            if post_webhook:
+                notify.post_rows(rows, webhook_url)
             if trade is not None and settings is not None:
                 notify.send_trade_email(
                     trade,
@@ -331,7 +344,7 @@ def _commit(
             order_kind=decision.order_kind,
         )
         _notify(action, None, decision.reason)
-        return
+        return sheet_rows
     if not allow_send:
         logger.info("DRY_RUN would send %s %s qty=%s", decision.order_kind, decision.symbol, decision.qty)
         _store(
@@ -347,7 +360,7 @@ def _commit(
             order_kind=decision.order_kind,
         )
         _notify("dry_run", None, decision.reason)
-        return
+        return sheet_rows
     mismatch = risk_gate.second_pass_mismatch(decision, refreshed)
     if mismatch:
         logger.warning("SEND_ABORTED %s", mismatch)
@@ -366,7 +379,7 @@ def _commit(
             detail=detail,
         )
         _notify("send_aborted", None, mismatch)
-        return
+        return sheet_rows
     if refreshed is not None and (
         refreshed.stop_price != decision.stop_price
         or refreshed.target_price != decision.target_price
@@ -401,13 +414,14 @@ def _commit(
         logger.exception("SEND_FAILED id=%s", row_id)
         decisions.complete(row_id, final_action="send_failed", order_id=None, detail=type(exc).__name__)
         _notify("send_failed", None, decision.reason)
-        return
+        return sheet_rows
     final = "send_failed" if result.status == "protection_failed_open" else "submitted"
     if result.status.startswith("protection_failed"):
         logger.critical("PROTECTION %s", result.log_line())
     decisions.complete(row_id, final_action=final, order_id=result.order_id, detail=result.message)
     trade = _trade_notice(decision, result, stored_context) if final == "submitted" else None
     _notify(final, result.order_id, decision.reason, trade)
+    return sheet_rows
 
 
 def _repair_decision(action: risk_gate.RepairAction) -> risk_gate.RiskDecision:
@@ -475,7 +489,8 @@ def _log_position_hold(
     review: positions.PositionReview,
     settings: config.Settings,
     allow_send: bool,
-) -> None:
+    post_webhook: bool = True,
+) -> list[dict[str, object]]:
     """Store a hold. No order is considered, so this never reaches the broker."""
 
     logger.info(
@@ -507,33 +522,33 @@ def _log_position_hold(
         )
     except Exception:
         logger.exception("POSITION_REVIEW log failed symbol=%s", review.symbol)
-        return
-    try:
-        notify.post_rows(
-            notify.build_rows(
-                timestamp=now,
-                allow_send=allow_send,
-                context=context,
-                suggestion=None,
-                verdict=risk_gate.VERDICT_NO_TRADE,
-                reason=review.reason,
-                approved=False,
-                final_action="no_trade",
-                order_id=None,
-                chart_filenames=[],
-                symbol=review.symbol,
-                risk_decision=risk,
-                action_type="position_review",
-                position_symbol=review.symbol,
-                position_decision="hold",
-                position_price=review.current_price,
-                unrealized_pl=review.unrealized_pl,
-                position_reason=review.reason,
-            ),
-            settings.n8n_webhook_url,
-        )
-    except Exception:
-        logger.exception("N8N_WEBHOOK failed")
+        return []
+    rows = notify.build_rows(
+        timestamp=now,
+        allow_send=allow_send,
+        context=context,
+        suggestion=None,
+        verdict=risk_gate.VERDICT_NO_TRADE,
+        reason=review.reason,
+        approved=False,
+        final_action="no_trade",
+        order_id=None,
+        chart_filenames=[],
+        symbol=review.symbol,
+        risk_decision=risk,
+        action_type="position_review",
+        position_symbol=review.symbol,
+        position_decision="hold",
+        position_price=review.current_price,
+        unrealized_pl=review.unrealized_pl,
+        position_reason=review.reason,
+    )
+    if post_webhook:
+        try:
+            notify.post_rows(rows, settings.n8n_webhook_url)
+        except Exception:
+            logger.exception("N8N_WEBHOOK failed")
+    return rows
 
 
 def _refreshed_close(trading, data_client, decisions, position, decision: risk_gate.RiskDecision):
@@ -850,6 +865,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Send approved paper orders. Without this flag every cycle is a dry run.",
     )
     parser.add_argument("--interval", type=int, default=None, help="Seconds between cycles.")
+    parser.add_argument(
+        "--multi-strategy",
+        action="store_true",
+        help="Scan the stock/ETF universe with the rule-based strategies. The crypto path stays unchanged without this flag.",
+    )
+    parser.add_argument(
+        "--strategies",
+        default="",
+        help="Comma-separated strategy ids for --multi-strategy. Default is all seven.",
+    )
     args = parser.parse_args(argv)
 
     from pathlib import Path
@@ -859,7 +884,7 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
     configure_logging(config.data_directory())
     try:
-        settings = config.load_settings()
+        settings = config.load_settings(require_model_key=not args.multi_strategy)
     except Exception as exc:
         logger.error("STARTUP %s", exc)
         return 1
@@ -873,13 +898,25 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.warning("MODE %s", "paper-send" if args.send_orders else "dry-run")
     logger.info("STARTUP %s", settings)
+    selected = tuple(item.strip() for item in args.strategies.split(",") if item.strip())
+    strategy_ids = None
+    if args.multi_strategy:
+        import strategies
+
+        try:
+            strategy_ids = strategies.enabled_ids(selected or None)
+        except ValueError as exc:
+            logger.error("STARTUP %s", exc)
+            return 1
     logger.info(
         "RISK_LIMITS max_risk=%s daily_loss=%s max_positions=%s symbols=%s window=24/7 UTC",
         config.MAX_RISK_FRACTION,
         config.DAILY_LOSS_FRACTION,
         config.MAX_OPEN_POSITIONS,
-        ",".join(config.ALLOWED_SYMBOLS),
+        ",".join(config.MULTI_STRATEGY_SYMBOLS if args.multi_strategy else config.ALLOWED_SYMBOLS),
     )
+    if args.multi_strategy:
+        logger.info("MULTI_STRATEGY ids=%s", ",".join(strategy_ids or ()))
     try:
         decisions = decision_log.DecisionLog(config.decisions_db_path())
     except Exception as exc:
@@ -897,7 +934,12 @@ def main(argv: list[str] | None = None) -> int:
         logger.exception("DASHBOARD failed to start")
     try:
         trading = execution.build_trading_client(settings)
-        data_client = scanner.build_data_client(settings)
+        if args.multi_strategy:
+            import equity_scan
+
+            data_client = equity_scan.build_stock_client(settings)
+        else:
+            data_client = scanner.build_data_client(settings)
     except Exception as exc:
         logger.error("CLIENT %s", exc)
         decisions.close()
@@ -906,7 +948,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         while True:
             try:
-                run_cycle(trading, data_client, decisions, settings, allow_send=args.send_orders)
+                if args.multi_strategy:
+                    import multi_runner
+
+                    multi_runner.run_cycle(
+                        trading,
+                        data_client,
+                        decisions,
+                        settings,
+                        allow_send=args.send_orders,
+                        strategy_ids=strategy_ids,
+                    )
+                else:
+                    run_cycle(trading, data_client, decisions, settings, allow_send=args.send_orders)
             except KeyboardInterrupt:
                 raise
             except Exception:

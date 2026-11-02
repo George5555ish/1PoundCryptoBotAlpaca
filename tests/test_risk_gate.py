@@ -119,7 +119,7 @@ class RiskGateTests(unittest.TestCase):
         held = risk_gate.OpenPosition(symbol="BTC/USD", qty=Decimal("0.01"))
         decision = risk_gate.evaluate(_request(open_positions=(held,)))
         self.assertFalse(decision.approved)
-        self.assertIn("already long", decision.reason)
+        self.assertIn("already have this symbol", decision.reason)
 
     def test_fifth_position_fills_the_book(self) -> None:
         held = tuple(

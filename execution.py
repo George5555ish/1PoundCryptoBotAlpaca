@@ -119,8 +119,13 @@ def fetch_account(client) -> AccountView:
     )
 
 
-def fetch_book(client) -> PositionBook:
-    """Read positions and working orders. Equity positions are not closed."""
+def fetch_book(client, *, include_equities: bool = False) -> PositionBook:
+    """Read positions and working orders.
+
+    Equity positions are left alone on the crypto path. ``include_equities``
+    adds the multi-strategy list so that tester can size one position per
+    symbol.
+    """
 
     from alpaca.trading.enums import QueryOrderStatus
     from alpaca.trading.requests import GetOrdersRequest
@@ -137,6 +142,17 @@ def fetch_book(client) -> PositionBook:
             getattr(getattr(position, "asset_class", ""), "value", getattr(position, "asset_class", ""))
         ).lower()
         canonical = config.normalize_symbol(raw_symbol)
+        if include_equities and config.is_multi_strategy_symbol(canonical) and side in {"long", "short"}:
+            positions.append(
+                risk_gate.OpenPosition(
+                    symbol=canonical,
+                    qty=qty,
+                    side=side,
+                    current_price=_text_number(getattr(position, "current_price", None)),
+                    unrealized_pl=_text_number(getattr(position, "unrealized_pl", None)),
+                )
+            )
+            continue
         if asset_class and asset_class not in {"crypto", "crypto_perp"}:
             other = True
             continue
@@ -158,7 +174,9 @@ def fetch_book(client) -> PositionBook:
     for order in client.get_orders(filter=request):
         raw_symbol = str(getattr(order, "symbol", "") or "")
         canonical = config.normalize_symbol(raw_symbol)
-        if not config.is_allowed_symbol(canonical):
+        if not config.is_managed_symbol(canonical):
+            continue
+        if not include_equities and not config.is_allowed_symbol(canonical):
             continue
         side = str(getattr(getattr(order, "side", ""), "value", getattr(order, "side", ""))).lower()
         if side not in {"buy", "sell"}:
@@ -170,7 +188,19 @@ def fetch_book(client) -> PositionBook:
 
     held = {position.symbol for position in positions}
     pending_symbols = tuple(
-        dict.fromkeys(order.symbol for order in orders if order.side == "buy" and order.symbol not in held)
+        dict.fromkeys(
+            order.symbol
+            for order in orders
+            if order.symbol not in held
+            and (
+                order.side == "buy"
+                or (
+                    include_equities
+                    and order.side == "sell"
+                    and config.is_multi_strategy_symbol(order.symbol)
+                )
+            )
+        )
     )
     pending_entry = (not held) and bool(pending_symbols)
     return PositionBook(
@@ -204,13 +234,45 @@ def _assert_paper(client) -> None:
 
 
 def _close_symbol(client, symbol: str):
-    """Close one crypto pair. The slash is encoded so the path stays one segment."""
+    """Close one position. Crypto slashes are encoded so the path stays one segment."""
 
-    encoded = quote(config.normalize_symbol(symbol), safe="")
+    canonical = config.normalize_symbol(symbol)
+    if config.is_multi_strategy_symbol(canonical):
+        return client.close_position(canonical)
+    encoded = quote(canonical, safe="")
     from alpaca.trading.models import Order
 
     response = client.delete(f"/positions/{encoded}", {})
     return Order(**response)
+
+
+def _submit_stock_entry(client, decision: risk_gate.RiskDecision) -> OrderResult:
+    """Paper stock/ETF entry: market parent plus stop and take-profit."""
+
+    from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
+
+    if not decision.symbol or not decision.qty or not decision.stop_price or not decision.target_price:
+        raise RuntimeError("stock entry is missing symbol, quantity, stop, or target")
+    side = OrderSide.BUY if decision.side == "buy" else OrderSide.SELL
+    order = client.submit_order(
+        MarketOrderRequest(
+            symbol=decision.symbol,
+            qty=float(decision.qty),
+            side=side,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=float(decision.target_price)),
+            stop_loss=StopLossRequest(stop_price=float(decision.stop_price)),
+            client_order_id=_client_order_id(decision.symbol, "eq"),
+        )
+    )
+    return OrderResult(
+        str(order.id),
+        str(order.status),
+        "stock bracket submitted",
+        fill_price=_text_number(getattr(order, "filled_avg_price", None)),
+    )
 
 
 def _cancel_symbol_orders(client, symbol: str, orders: tuple[risk_gate.WorkingOrder, ...]) -> None:
@@ -253,6 +315,8 @@ def submit(client, decision: risk_gate.RiskDecision, allow_send: bool, book: Pos
 
     if decision.order_kind != risk_gate.ORDER_KIND_ENTRY:
         raise RuntimeError(f"unsupported order kind {decision.order_kind}")
+    if config.is_multi_strategy_symbol(decision.symbol or ""):
+        return _submit_stock_entry(client, decision)
     if not decision.symbol or not decision.qty or not decision.stop_price:
         raise RuntimeError("entry is missing symbol, quantity, or stop")
 
