@@ -1,1 +1,1 @@
-worker: python main.py --send-orders
+worker: python main.py --send-orders --multi-strategy

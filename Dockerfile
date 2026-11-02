@@ -16,5 +16,5 @@ COPY . .
 RUN mkdir -p /data
 
 # Paper orders after the risk gate approves them. Override to
-# python main.py for a dry run. The paper host is still required.
-CMD ["python", "main.py", "--send-orders"]
+# python main.py --multi-strategy for a dry run. The paper host is still required.
+CMD ["python", "main.py", "--send-orders", "--multi-strategy"]
