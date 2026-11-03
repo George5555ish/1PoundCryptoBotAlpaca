@@ -264,6 +264,21 @@ def _close_symbol(client, symbol: str):
     return Order(**response)
 
 
+def stock_share_qty(qty: object) -> int:
+    """Whole shares for a stock bracket. Alpaca rejects fractional brackets."""
+
+    try:
+        number = Decimal(str(qty))
+    except Exception as exc:
+        raise RuntimeError("stock quantity is not a number") from exc
+    if not number.is_finite() or number <= 0:
+        raise RuntimeError("stock quantity must be positive")
+    shares = int(number.to_integral_value(rounding=ROUND_DOWN))
+    if shares <= 0:
+        raise RuntimeError("stock bracket quantity must be a whole share")
+    return shares
+
+
 def _submit_stock_entry(client, decision: risk_gate.RiskDecision) -> OrderResult:
     """Paper stock/ETF entry: market parent plus stop and take-profit."""
 
@@ -273,10 +288,11 @@ def _submit_stock_entry(client, decision: risk_gate.RiskDecision) -> OrderResult
     if not decision.symbol or not decision.qty or not decision.stop_price or not decision.target_price:
         raise RuntimeError("stock entry is missing symbol, quantity, stop, or target")
     side = OrderSide.BUY if decision.side == "buy" else OrderSide.SELL
+    shares = stock_share_qty(decision.qty)
     order = client.submit_order(
         MarketOrderRequest(
             symbol=decision.symbol,
-            qty=float(decision.qty),
+            qty=shares,
             side=side,
             time_in_force=TimeInForce.DAY,
             order_class=OrderClass.BRACKET,

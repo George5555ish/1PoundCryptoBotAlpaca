@@ -427,6 +427,7 @@ def _evaluate_entry(request: GateRequest, symbol: str, model_reason: str) -> Ris
         (ask * config.SLIPPAGE_ALLOWANCE_FRACTION).quantize(config.CENT, rounding=ROUND_UP),
     )
     sizing_distance = stop_distance + slippage
+    # Stocks size in whole shares. Alpaca brackets reject a fractional qty.
     quantum = config.EQUITY_QTY_QUANTUM if equity_symbol else config.QTY_QUANTUM
     raw_qty = (budget / sizing_distance).quantize(quantum, rounding=ROUND_DOWN)
     max_notional = min(equity, buying_power) * config.MAX_POSITION_FRACTION

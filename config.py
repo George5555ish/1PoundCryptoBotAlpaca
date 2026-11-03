@@ -70,7 +70,8 @@ MULTI_STRATEGY_IDS: tuple[str, ...] = (
     "mtf_ema_vwap_reclaim",
     "current_momentum_pullback",
 )
-EQUITY_QTY_QUANTUM = Decimal("0.01")
+# Alpaca brackets cannot be fractional. Stock size is whole shares, floored.
+EQUITY_QTY_QUANTUM = Decimal("1")
 
 # Concurrent longs in this universe. A working buy in a symbol we do not
 # already hold occupies one of these slots. Locked at 5.
@@ -142,6 +143,7 @@ def _require(condition: bool, message: str) -> None:
         raise RuntimeError(f"invalid risk configuration: {message}")
 
 
+_require(EQUITY_QTY_QUANTUM == Decimal("1"), "stock brackets need whole shares")
 _require(MAX_OPEN_POSITIONS == 5, "V1 allows five open positions")
 _require(MAX_RISK_FRACTION == Decimal("0.01"), "per-trade risk is 1% of current equity")
 _require(DAILY_LOSS_FRACTION == Decimal("0.03"), "daily loss halt is 3%")

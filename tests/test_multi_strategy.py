@@ -36,6 +36,9 @@ class MultiStrategyGateTests(unittest.TestCase):
         self.assertEqual(decision.side, "buy")
         self.assertEqual(decision.symbol, "SPY")
         self.assertLessEqual(Decimal(decision.planned_loss or "0"), Decimal("1000"))
+        qty = Decimal(decision.qty or "0")
+        self.assertEqual(qty, qty.to_integral_value())
+        self.assertGreater(qty, 0)
 
     def test_spy_short_is_sized_from_the_stop_above(self) -> None:
         decision = risk_gate.evaluate(

@@ -515,6 +515,7 @@ def run_cycle(
             refreshed = risk_gate.evaluate(
                 bot._request_from(suggestion, account, day_start, fresh_book, fresh_view, datetime.now(timezone.utc))
             )
+        before = len(cycle_rows)
         cycle_rows.extend(
             bot._commit(
                 decisions,
@@ -533,7 +534,9 @@ def run_cycle(
                 post_webhook=False,
             )
         )
-        if decision.approved:
+        filled = {str(row.get("final_action") or "") for row in cycle_rows[before:]}
+        occupy = decision.approved and ("submitted" in filled or "dry_run" in filled)
+        if occupy:
             held.add(symbol)
             book = execution.PositionBook(
                 positions=book.positions

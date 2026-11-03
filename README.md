@@ -136,7 +136,7 @@ A subset of strategies:
 python main.py --once --multi-strategy --strategies ema_stack_pullback,current_momentum_pullback
 ```
 
-Paper orders still need `--send-orders`. Stock entries use a day bracket. Crypto entries stay on the original path.
+Paper orders still need `--send-orders`. Stock entries use a day bracket on whole shares; Alpaca rejects a fractional bracket. Crypto entries stay on the original path.
 
 Each decision row and webhook payload includes `strategy_id`, `symbol`, `action`, `reason`, `stop_price`, `target_price`, `approved`, and `order_id`. The cycle prints `MULTI_SUMMARY scanned=… signals=… approved=… rejected=… session=…`. Charts are drawn for symbols that produce a non-hold signal. A closed-session cycle does not write per-symbol session-closed rows.
 

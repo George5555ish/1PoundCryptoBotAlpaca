@@ -62,6 +62,29 @@ class ExecutionGuardTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             execution.submit(object(), approved, allow_send=False)
 
+    def test_stock_bracket_uses_whole_shares(self) -> None:
+        from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+        from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
+
+        self.assertEqual(execution.stock_share_qty("359.14"), 359)
+        self.assertEqual(execution.stock_share_qty("359"), 359)
+        with self.assertRaises(RuntimeError):
+            execution.stock_share_qty("0.4")
+
+        entry = MarketOrderRequest(
+            symbol="MTUM",
+            qty=execution.stock_share_qty("359.14"),
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=283.95),
+            stop_loss=StopLossRequest(stop_price=276.40),
+        )
+        fields = entry.to_request_fields()
+        self.assertEqual(fields["order_class"], "bracket")
+        self.assertEqual(int(float(fields["qty"])), 359)
+        self.assertEqual(fields["qty"], 359)
+
     def test_paper_url_guard(self) -> None:
         import config
 

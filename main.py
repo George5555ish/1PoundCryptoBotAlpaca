@@ -411,8 +411,8 @@ def _commit(
     try:
         result = execution.submit(trading, decision, allow_send=True, book=book)
     except Exception as exc:
-        logger.exception("SEND_FAILED id=%s", row_id)
-        decisions.complete(row_id, final_action="send_failed", order_id=None, detail=type(exc).__name__)
+        logger.exception("SEND_FAILED id=%s %s", row_id, exc)
+        decisions.complete(row_id, final_action="send_failed", order_id=None, detail=str(exc)[:500])
         _notify("send_failed", None, decision.reason)
         return sheet_rows
     final = "send_failed" if result.status == "protection_failed_open" else "submitted"
