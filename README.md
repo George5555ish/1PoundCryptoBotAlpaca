@@ -123,8 +123,8 @@ Each cycle runs the enabled rule-based strategies in `strategies/`. No model is 
 US cash hours are 09:30–16:00 America/New_York, weekdays, and the Alpaca clock must not be closed (holidays and early closes count). Stock brackets are DAY orders, so they expire at the bell:
 
 - During the session: scan, enter, and review as usual, every `LOOP_INTERVAL_SECONDS`.
-- Last 15 minutes before the close: no new entries. Open equity positions are flattened.
-- Nights, weekends, and holidays: no scan and no orders. One heartbeat webhook (`session=closed`, `next_open=…`), then sleep until the next open, waking at least every 30 minutes.
+- Last 20 minutes before the close: no new entries. Every stock/ETF position is flattened. The loop retries every 15 seconds until the book is flat. An early broker close, or leftover names after the bell, also flatten instead of riding overnight.
+- Nights, weekends, and holidays with no leftover equity: no scan and no orders. One heartbeat webhook (`session=closed`, `next_open=…`), then sleep until the next open, waking at least every 30 minutes.
 
 ```powershell
 python main.py --once --multi-strategy

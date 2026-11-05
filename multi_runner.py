@@ -8,10 +8,11 @@ US cash hours are 09:30–16:00 America/New_York, weekdays. Stock brackets are
 DAY orders, so they die at the close. That drives three modes:
 
 - ``open``: scan, enter, and review as usual.
-- ``flatten``: last 15 minutes of the session. No new entries. Close every
-  equity position we still hold.
-- ``closed``: nights, weekends, and holidays. No scan, no entries, no
-  closes. One heartbeat webhook, then sleep until the next open.
+- ``flatten``: last 20 minutes of the session, an early broker close, or
+  leftover equity after the bell. No new entries. Close every stock/ETF
+  we still hold, then retry until the book is flat.
+- ``closed``: nights, weekends, and holidays with no leftover equity. No
+  scan and no orders. One heartbeat webhook, then sleep until the next open.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ logger = logging.getLogger("multi_runner")
 MARKET_TZ = ZoneInfo("America/New_York")
 SESSION_OPEN_MINUTES = 9 * 60 + 30
 SESSION_CLOSE_MINUTES = 16 * 60
-FLATTEN_MINUTES_BEFORE_CLOSE = 15
+FLATTEN_MINUTES_BEFORE_CLOSE = 20
 CLOSED_HEARTBEAT_SECONDS = 1800
 WAKE_BEFORE_OPEN_SECONDS = 30
 
@@ -66,7 +67,7 @@ def cash_session_open(now: datetime) -> bool:
 
 
 def flatten_window(now: datetime) -> bool:
-    """Last 15 minutes of a weekday cash session, before the bell."""
+    """Last 20 minutes of a weekday cash session, before the bell."""
 
     eastern = _eastern(now)
     if eastern.weekday() >= 5:
@@ -88,17 +89,26 @@ def next_cash_open(now: datetime) -> datetime:
     return cursor.astimezone(timezone.utc)
 
 
-def session_status(now: datetime, broker_open: bool | None = None) -> str:
+def session_status(
+    now: datetime,
+    broker_open: bool | None = None,
+    *,
+    holding_equity: bool = False,
+) -> str:
     """``open``, ``flatten``, or ``closed``.
 
-    A holiday or early close from the broker clock counts as closed even if
-    the weekday calendar still looks like a regular session.
+    Flatten wins inside the pre-close window even if the broker clock has
+    already flipped. Leftover stock/ETF positions after the bell or on an
+    early close also flatten instead of idling overnight.
     """
 
-    if not cash_session_open(now) or broker_open is False:
-        return "closed"
     if flatten_window(now):
         return "flatten"
+    calendar_open = cash_session_open(now)
+    if holding_equity and (not calendar_open or broker_open is False):
+        return "flatten"
+    if not calendar_open or broker_open is False:
+        return "closed"
     return "open"
 
 
@@ -106,6 +116,10 @@ def cycle_sleep_seconds(now: datetime, interval: int, status: str) -> int:
     """How long the loop should wait after this cycle."""
 
     wait = max(config.MIN_LOOP_INTERVAL_SECONDS, int(interval))
+    if status == "flatten":
+        if flatten_window(now) or cash_session_open(now):
+            return config.MIN_LOOP_INTERVAL_SECONDS
+        return CLOSED_HEARTBEAT_SECONDS
     if status != "closed":
         return wait
     remaining = int((next_cash_open(now) - _aware(now)).total_seconds()) - WAKE_BEFORE_OPEN_SECONDS
@@ -251,7 +265,8 @@ def run_cycle(
     day_start = decisions.day_start_equity(now, account.equity)
     book = execution.fetch_book(trading, include_equities=True)
     broker_open = _broker_open(trading)
-    status = session_status(now, broker_open)
+    holding_equity = any(config.is_multi_strategy_symbol(item.symbol) for item in book.positions)
+    status = session_status(now, broker_open, holding_equity=holding_equity)
     next_open = next_cash_open(now)
     try:
         pnl = Decimal(account.equity) - Decimal(day_start)
@@ -325,6 +340,10 @@ def run_cycle(
         )
         return finish({"scanned": 0, "signals": 0, "approved": 0, "rejected": 0})
 
+    if status == "flatten":
+        held = ",".join(f"{item.symbol}:{item.side}" for item in book.positions) or "flat"
+        logger.warning("FLATTEN_FAILSAFE closing stock/ETF positions before the bell symbols=%s", held)
+
     repairs = risk_gate.plan_repairs(book.positions, book.orders)
     if repairs:
         if account.trading_blocked:
@@ -357,7 +376,9 @@ def run_cycle(
                     post_webhook=False,
                 )
             )
-        return finish({"scanned": 0, "signals": 0, "approved": 0, "rejected": len(repairs)})
+        if status != "flatten":
+            return finish({"scanned": 0, "signals": 0, "approved": 0, "rejected": len(repairs)})
+        book = execution.fetch_book(trading, include_equities=True)
 
     try:
         scan = equity_scan.scan(data_client)
@@ -468,6 +489,20 @@ def run_cycle(
             )
         )
         closed_any = True
+    if status == "flatten":
+        leftover: list[str] = []
+        try:
+            leftover = [
+                f"{item.symbol}:{item.side}"
+                for item in execution.fetch_book(trading, include_equities=True).positions
+                if config.is_multi_strategy_symbol(item.symbol)
+            ]
+        except Exception:
+            logger.exception("FLATTEN_INCOMPLETE could not re-read the book")
+        if leftover:
+            logger.critical("FLATTEN_INCOMPLETE still open %s; retrying", ",".join(leftover))
+        else:
+            logger.info("FLATTEN_CLEAR book is flat before the bell")
     if closed_any:
         return finish({"scanned": len(scan.views), "signals": 0, "approved": 1, "rejected": 0})
     if status == "flatten":

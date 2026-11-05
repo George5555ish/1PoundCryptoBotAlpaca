@@ -151,8 +151,19 @@ class StrategyEngineTests(unittest.TestCase):
         after_close = datetime(2026, 10, 26, 20, 5, tzinfo=timezone.utc)  # 16:05 EDT
         self.assertEqual(multi_runner.session_status(flatten), "flatten")
         self.assertEqual(multi_runner.session_status(after_close), "closed")
-        self.assertEqual(multi_runner.session_status(flatten, broker_open=False), "closed")
-        self.assertEqual(multi_runner.cycle_sleep_seconds(flatten, 300, "flatten"), 300)
+        self.assertEqual(multi_runner.session_status(flatten, broker_open=False), "flatten")
+        self.assertEqual(
+            multi_runner.cycle_sleep_seconds(flatten, 300, "flatten"),
+            config.MIN_LOOP_INTERVAL_SECONDS,
+        )
+        self.assertEqual(
+            multi_runner.session_status(after_close, holding_equity=True),
+            "flatten",
+        )
+        self.assertEqual(
+            multi_runner.cycle_sleep_seconds(after_close, 300, "flatten"),
+            multi_runner.CLOSED_HEARTBEAT_SECONDS,
+        )
 
     def test_holiday_clock_overrides_the_weekday_calendar(self) -> None:
         from datetime import datetime, timezone
