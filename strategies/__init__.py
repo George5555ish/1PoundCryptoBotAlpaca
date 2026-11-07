@@ -11,7 +11,7 @@ EvaluateFn = Callable[[str, list[Mapping[str, object]], Mapping[str, object]], d
 
 
 def load_evaluate(strategy_id: str) -> EvaluateFn:
-    if strategy_id not in config.MULTI_STRATEGY_IDS:
+    if strategy_id not in config.MULTI_STRATEGY_CATALOG:
         raise ValueError(f"unknown strategy_id {strategy_id}")
     module = import_module(f"strategies.{strategy_id}")
     evaluate = getattr(module, "evaluate", None)
@@ -23,7 +23,7 @@ def load_evaluate(strategy_id: str) -> EvaluateFn:
 def enabled_ids(selected: tuple[str, ...] | None = None) -> tuple[str, ...]:
     if not selected:
         return config.MULTI_STRATEGY_IDS
-    unknown = [item for item in selected if item not in config.MULTI_STRATEGY_IDS]
+    unknown = [item for item in selected if item not in config.MULTI_STRATEGY_CATALOG]
     if unknown:
         raise ValueError(f"unknown strategy_id values: {', '.join(unknown)}")
     return selected

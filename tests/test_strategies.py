@@ -32,7 +32,11 @@ def _bars(closes: list[float], volume: float = 1000.0) -> list[dict[str, object]
 
 class StrategyEngineTests(unittest.TestCase):
     def test_all_seven_load_and_hold_on_empty_candles(self) -> None:
-        for strategy_id in config.MULTI_STRATEGY_IDS:
+        self.assertEqual(
+            config.MULTI_STRATEGY_IDS,
+            ("anchored_vwap_mean_reversion", "ema_stack_pullback"),
+        )
+        for strategy_id in config.MULTI_STRATEGY_CATALOG:
             evaluate = strategies.load_evaluate(strategy_id)
             payload = evaluate("SPY", [], {})
             self.assertEqual(set(payload), {"action", "direction", "stop_price", "target_price", "reason", "strategy_id"})

@@ -159,6 +159,42 @@ class DecisionLogTests(unittest.TestCase):
             log.close()
             store_path.unlink(missing_ok=True)
 
+    def test_profit_lock_latches_for_the_utc_day(self) -> None:
+        store_path = Path(__file__).resolve().parent / "_tmp_profit_lock.db"
+        if store_path.exists():
+            store_path.unlink()
+        log = decision_log.DecisionLog(store_path)
+        now = datetime(2026, 10, 22, 21, 0, tzinfo=timezone.utc)
+        try:
+            self.assertEqual(log.profit_lock_state(now), (False, False))
+            log.latch_profit_lock(now)
+            self.assertEqual(log.profit_lock_state(now), (True, False))
+            log.latch_profit_giveback(now)
+            self.assertEqual(log.profit_lock_state(now), (True, True))
+            nxt = now + timedelta(days=1)
+            self.assertEqual(log.profit_lock_state(nxt), (False, False))
+        finally:
+            log.close()
+            store_path.unlink(missing_ok=True)
+
+    def test_apply_profit_lock_latches_giveback_after_the_peak(self) -> None:
+        store_path = Path(__file__).resolve().parent / "_tmp_profit_giveback.db"
+        if store_path.exists():
+            store_path.unlink()
+        log = decision_log.DecisionLog(store_path)
+        now = datetime(2026, 10, 22, 21, 0, tzinfo=timezone.utc)
+        try:
+            lock_on, giveback = log.apply_profit_lock(now, "101500", "100000")
+            self.assertTrue(lock_on)
+            self.assertFalse(giveback)
+            lock_on, giveback = log.apply_profit_lock(now, "100700", "100000")
+            self.assertTrue(lock_on)
+            self.assertTrue(giveback)
+            self.assertEqual(log.profit_lock_state(now), (True, True))
+        finally:
+            log.close()
+            store_path.unlink(missing_ok=True)
+
     def test_submit_is_only_called_after_the_audit_insert(self) -> None:
         source = Path(__file__).resolve().parent.parent.joinpath("main.py").read_text(encoding="utf-8")
         self.assertEqual(source.count("execution.submit("), 1)

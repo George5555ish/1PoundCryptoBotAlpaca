@@ -59,7 +59,7 @@ Copy-Item .env.example .env
 
 Put the paper key id in `ALPACA_API_KEY` and the paper secret in `ALPACA_SECRET_KEY`. `ALPACA_PAPER` must stay `true`.
 
-`OPENAI_API_KEY` is an OpenAI key from https://platform.openai.com/api-keys. It starts with `sk-`. Leave the base URL as `https://api.openai.com/v1` and the model as `gpt-4o`. `--multi-strategy` does not call the model; the seven rules decide the trade.
+`OPENAI_API_KEY` is an OpenAI key from https://platform.openai.com/api-keys. It starts with `sk-`. Leave the base URL as `https://api.openai.com/v1` and the model as `gpt-4o`. `--multi-strategy` does not call the model; the enabled rules in `MULTI_STRATEGY_IDS` decide the trade.
 
 ## Dry run
 
@@ -116,9 +116,11 @@ Set `TRADE_NOTIFY_EMAIL` and `SMTP_HOST` to also send that event by email. If th
 
 `--multi-strategy` is an extra mode on this process. The default crypto loop is unchanged.
 
-It scans a configurable list of twenty liquid stocks and ETFs (`SPY`, `QQQ`, `IWM`, `DIA`, `XLK`, `XLF`, `XLE`, `XLV`, `SMH`, `MTUM`, `ARKK`, `AAPL`, `MSFT`, `NVDA`, `TSLA`, `AMZN`, `META`, `GOOGL`, `AMD`, `NFLX`). Add `GLD`, `SLV`, or `USO` to `MULTI_STRATEGY_SYMBOLS` in `config.py` when commodities should be included.
+It scans a configurable list in `MULTI_STRATEGY_SYMBOLS` (currently `IWM`, `QQQ`, `DIA`). Add `GLD`, `SLV`, or `USO` from `COMMODITY_SYMBOLS` when commodities should be included.
 
-Each cycle runs the enabled rule-based strategies in `strategies/`. No model is used for the decision. The first non-hold per symbol is sent through the same Risk Gate (1% risk, 3% daily loss, max five positions). One open position per symbol. Dry-run is still the default.
+Each cycle runs the enabled rule-based strategies in `strategies/`. The default enabled set is `MULTI_STRATEGY_IDS` (`anchored_vwap_mean_reversion`, `ema_stack_pullback`). Other catalogued rules stay on disk and can be re-enabled with `--strategies` or by editing `MULTI_STRATEGY_IDS`. No model is used for the decision. The first non-hold per symbol is sent through the same Risk Gate (1% risk, 3% daily loss, max three positions, daily profit lock at +1.5%). One open position per symbol. Dry-run is still the default.
+
+When UTC-day P/L reaches +1.5% of `day_start_equity`, new entries stop for the rest of that UTC day (`daily profit lock: +1.5% reached`). If P/L later falls below +0.8% after that lock, every open stock/ETF is flattened and the day stays halted.
 
 US cash hours are 09:30–16:00 America/New_York, weekdays, and the Alpaca clock must not be closed (holidays and early closes count). Stock brackets are DAY orders, so they expire at the bell:
 
@@ -130,10 +132,10 @@ US cash hours are 09:30–16:00 America/New_York, weekdays, and the Alpaca clock
 python main.py --once --multi-strategy
 ```
 
-A subset of strategies:
+A subset of strategies (ids must be in `MULTI_STRATEGY_CATALOG`):
 
 ```powershell
-python main.py --once --multi-strategy --strategies ema_stack_pullback,current_momentum_pullback
+python main.py --once --multi-strategy --strategies anchored_vwap_mean_reversion,ema_stack_pullback
 ```
 
 Paper orders still need `--send-orders`. Stock entries use a day bracket on whole shares; Alpaca rejects a fractional bracket. Crypto entries stay on the original path.

@@ -68,6 +68,15 @@ CREATE TABLE IF NOT EXISTS utc_day_equity (
 )
 """
 
+_CREATE_PROFIT_LOCK = """
+CREATE TABLE IF NOT EXISTS utc_day_profit_lock (
+    utc_date TEXT PRIMARY KEY,
+    hit INTEGER NOT NULL DEFAULT 0,
+    giveback INTEGER NOT NULL DEFAULT 0,
+    recorded_at TEXT NOT NULL
+)
+"""
+
 
 def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True, default=str)
@@ -104,6 +113,7 @@ class DecisionLog:
         self._ensure_action_type()
         self._ensure_strategy_id()
         self._conn.execute(_CREATE_DAY)
+        self._conn.execute(_CREATE_PROFIT_LOCK)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp)"
         )
@@ -130,6 +140,69 @@ class DecisionLog:
         with self._lock:
             self._conn.close()
 
+    def _utc_date(self, now: datetime) -> str:
+        if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+            raise ValueError("day-start timestamp must be timezone-aware")
+        return now.astimezone(timezone.utc).date().isoformat()
+
+    def latch_profit_lock(self, now: datetime) -> None:
+        """Remember that this UTC date has already hit the +1.5% lock."""
+
+        utc_date = self._utc_date(now)
+        recorded_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO utc_day_profit_lock (utc_date, hit, giveback, recorded_at)
+                VALUES (?, 1, 0, ?)
+                ON CONFLICT(utc_date) DO UPDATE SET hit = 1
+                """,
+                (utc_date, recorded_at),
+            )
+            self._conn.commit()
+
+    def latch_profit_giveback(self, now: datetime) -> None:
+        """Remember a giveback halt after the +1.5% lock for this UTC date."""
+
+        utc_date = self._utc_date(now)
+        recorded_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO utc_day_profit_lock (utc_date, hit, giveback, recorded_at)
+                VALUES (?, 1, 1, ?)
+                ON CONFLICT(utc_date) DO UPDATE SET hit = 1, giveback = 1
+                """,
+                (utc_date, recorded_at),
+            )
+            self._conn.commit()
+
+    def profit_lock_state(self, now: datetime) -> tuple[bool, bool]:
+        """Return ``(hit_lock, giveback)`` flags stored for ``now``'s UTC date."""
+
+        utc_date = self._utc_date(now)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT hit, giveback FROM utc_day_profit_lock WHERE utc_date = ?",
+                (utc_date,),
+            ).fetchone()
+        if row is None:
+            return False, False
+        return bool(row["hit"]), bool(row["giveback"])
+
+    def apply_profit_lock(self, now: datetime, equity: object, day_start: str) -> tuple[bool, bool]:
+        """Latch +1.5% / giveback for this UTC date. Returns ``(lock_on, giveback)``."""
+
+        import risk_gate
+
+        if risk_gate.daily_profit_hit(equity, day_start):
+            self.latch_profit_lock(now)
+        lock_on, giveback = self.profit_lock_state(now)
+        if risk_gate.daily_profit_giveback(equity, day_start, locked=lock_on):
+            self.latch_profit_giveback(now)
+            return True, True
+        return lock_on, giveback
+
     def day_start_equity(self, now: datetime, equity: str) -> str:
         """Return the equity frozen for ``now``'s UTC date.
 
@@ -137,15 +210,13 @@ class DecisionLog:
         stored value even if the account has moved. ``now`` must be aware.
         """
 
-        if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
-            raise ValueError("day-start timestamp must be timezone-aware")
+        utc_date = self._utc_date(now)
         try:
             amount = Decimal(equity)
         except Exception as exc:
             raise ValueError("day-start equity must be a decimal string") from exc
         if not amount.is_finite() or amount <= 0:
             raise ValueError("day-start equity must be a positive number")
-        utc_date = now.astimezone(timezone.utc).date().isoformat()
         recorded_at = datetime.now(timezone.utc).isoformat()
         stored = format(amount, "f")
         with self._lock:

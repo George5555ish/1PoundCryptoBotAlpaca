@@ -13,16 +13,18 @@ NOW = datetime(2026, 10, 26, 14, 30, tzinfo=timezone.utc)
 
 
 class MultiStrategyGateTests(unittest.TestCase):
-    def test_universe_has_twenty_liquid_names(self) -> None:
-        self.assertEqual(len(config.MULTI_STRATEGY_SYMBOLS), 20)
-        self.assertIn("SPY", config.MULTI_STRATEGY_SYMBOLS)
-        self.assertIn("NFLX", config.MULTI_STRATEGY_SYMBOLS)
+    def test_universe_is_the_top_three_names(self) -> None:
+        self.assertEqual(config.MULTI_STRATEGY_SYMBOLS, ("IWM", "QQQ", "DIA"))
         self.assertEqual(config.COMMODITY_SYMBOLS, ("GLD", "SLV", "USO"))
+        self.assertEqual(
+            config.MULTI_STRATEGY_IDS,
+            ("anchored_vwap_mean_reversion", "ema_stack_pullback"),
+        )
 
-    def test_spy_long_goes_through_the_same_gate(self) -> None:
+    def test_qqq_long_goes_through_the_same_gate(self) -> None:
         decision = risk_gate.evaluate(
             _request(
-                symbol="SPY",
+                symbol="QQQ",
                 direction="long",
                 bid="499.90",
                 ask="500.00",
@@ -34,16 +36,16 @@ class MultiStrategyGateTests(unittest.TestCase):
         )
         self.assertTrue(decision.approved, decision.reason)
         self.assertEqual(decision.side, "buy")
-        self.assertEqual(decision.symbol, "SPY")
+        self.assertEqual(decision.symbol, "QQQ")
         self.assertLessEqual(Decimal(decision.planned_loss or "0"), Decimal("1000"))
         qty = Decimal(decision.qty or "0")
         self.assertEqual(qty, qty.to_integral_value())
         self.assertGreater(qty, 0)
 
-    def test_spy_short_is_sized_from_the_stop_above(self) -> None:
+    def test_qqq_short_is_sized_from_the_stop_above(self) -> None:
         decision = risk_gate.evaluate(
             _request(
-                symbol="SPY",
+                symbol="QQQ",
                 direction="short",
                 bid="499.90",
                 ask="500.00",
@@ -66,10 +68,10 @@ class MultiStrategyGateTests(unittest.TestCase):
         self.assertIn("long only", decision.reason)
 
     def test_one_position_per_symbol(self) -> None:
-        held = risk_gate.OpenPosition(symbol="SPY", qty=Decimal("1"), side="long")
+        held = risk_gate.OpenPosition(symbol="QQQ", qty=Decimal("1"), side="long")
         decision = risk_gate.evaluate(
             _request(
-                symbol="SPY",
+                symbol="QQQ",
                 direction="long",
                 bid="499.90",
                 ask="500.00",
@@ -82,6 +84,22 @@ class MultiStrategyGateTests(unittest.TestCase):
         )
         self.assertFalse(decision.approved)
         self.assertIn("already have this symbol", decision.reason)
+
+    def test_spy_is_outside_the_active_universe(self) -> None:
+        decision = risk_gate.evaluate(
+            _request(
+                symbol="SPY",
+                direction="long",
+                bid="499.90",
+                ask="500.00",
+                stop_price="495.00",
+                target_price="510.00",
+                now=NOW,
+                quote_time=NOW,
+            )
+        )
+        self.assertFalse(decision.approved)
+        self.assertIn("universe", decision.reason)
 
     def test_sol_is_still_outside_both_universes(self) -> None:
         decision = risk_gate.evaluate(

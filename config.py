@@ -37,45 +37,35 @@ from dotenv import load_dotenv
 ALLOWED_SYMBOLS: tuple[str, ...] = ("BTC/USD", "ETH/USD")
 
 # Equity universe for ``--multi-strategy``. One open position per symbol.
-# Append GLD, SLV, USO here when commodities should be tested.
+# Edit this tuple to change the active names. Append GLD, SLV, USO from
+# COMMODITY_SYMBOLS when commodities should be tested.
 MULTI_STRATEGY_SYMBOLS: tuple[str, ...] = (
-    "SPY",
-    "QQQ",
     "IWM",
+    "QQQ",
     "DIA",
-    "XLK",
-    "XLF",
-    "XLE",
-    "XLV",
-    "SMH",
-    "MTUM",
-    "ARKK",
-    "AAPL",
-    "MSFT",
-    "NVDA",
-    "TSLA",
-    "AMZN",
-    "META",
-    "GOOGL",
-    "AMD",
-    "NFLX",
 )
 COMMODITY_SYMBOLS: tuple[str, ...] = ("GLD", "SLV", "USO")
-MULTI_STRATEGY_IDS: tuple[str, ...] = (
+# Modules that ``--strategies`` may enable. Default enabled set is
+# ``MULTI_STRATEGY_IDS`` below.
+MULTI_STRATEGY_CATALOG: tuple[str, ...] = (
+    "anchored_vwap_mean_reversion",
     "ema_stack_pullback",
     "vwap_orb_pullback",
     "vwap_squeeze_breakout",
-    "anchored_vwap_mean_reversion",
     "long_horizon_momentum",
     "mtf_ema_vwap_reclaim",
     "current_momentum_pullback",
 )
+MULTI_STRATEGY_IDS: tuple[str, ...] = (
+    "anchored_vwap_mean_reversion",
+    "ema_stack_pullback",
+)
 # Alpaca brackets cannot be fractional. Stock size is whole shares, floored.
 EQUITY_QTY_QUANTUM = Decimal("1")
 
-# Concurrent longs in this universe. A working buy in a symbol we do not
-# already hold occupies one of these slots. Locked at 5.
-MAX_OPEN_POSITIONS: int = 5
+# Concurrent positions across the whole book. A working entry in a symbol we
+# do not already hold occupies one of these slots. Locked at 3.
+MAX_OPEN_POSITIONS: int = 3
 
 # Daily loss resets on the UTC date, because the crypto market does not close.
 UTC_DAY_NAME = "UTC"
@@ -94,6 +84,13 @@ MAX_RISK_FRACTION = Decimal("0.01")
 # 3% of UTC-day-start equity. At or beyond this, new entries halt until the
 # next UTC date. An open long can still be closed.
 DAILY_LOSS_FRACTION = Decimal("0.03")
+
+# +1.5% of UTC-day-start equity latches a profit lock: no new entries for
+# the rest of that UTC day. If P/L then falls below +0.8%, flatten and halt.
+DAILY_PROFIT_LOCK_FRACTION = Decimal("0.015")
+DAILY_PROFIT_GIVEBACK_FRACTION = Decimal("0.008")
+DAILY_PROFIT_LOCK_REASON = "daily profit lock: +1.5% reached"
+DAILY_PROFIT_GIVEBACK_REASON = "daily profit lock: giveback below +0.8% after +1.5%"
 
 # No leverage. Notional cannot exceed the smaller of equity and buying power.
 MAX_POSITION_FRACTION = Decimal("1")
@@ -144,9 +141,15 @@ def _require(condition: bool, message: str) -> None:
 
 
 _require(EQUITY_QTY_QUANTUM == Decimal("1"), "stock brackets need whole shares")
-_require(MAX_OPEN_POSITIONS == 5, "V1 allows five open positions")
+_require(MAX_OPEN_POSITIONS == 3, "V1 allows three open positions")
 _require(MAX_RISK_FRACTION == Decimal("0.01"), "per-trade risk is 1% of current equity")
 _require(DAILY_LOSS_FRACTION == Decimal("0.03"), "daily loss halt is 3%")
+_require(DAILY_PROFIT_LOCK_FRACTION == Decimal("0.015"), "daily profit lock is +1.5%")
+_require(DAILY_PROFIT_GIVEBACK_FRACTION == Decimal("0.008"), "profit-lock giveback is +0.8%")
+_require(
+    Decimal("0") < DAILY_PROFIT_GIVEBACK_FRACTION < DAILY_PROFIT_LOCK_FRACTION,
+    "giveback must sit below the profit lock",
+)
 _require(MAX_POSITION_FRACTION == Decimal("1"), "V1 does not use leverage")
 _require(Decimal("0") < MIN_STOP_FRACTION < MAX_RISK_FRACTION, "min stop fraction")
 _require(Decimal("0") < SLIPPAGE_ALLOWANCE_FRACTION < MIN_STOP_FRACTION, "slippage fraction")
@@ -154,11 +157,14 @@ _require(Decimal("0") < MAX_SPREAD_FRACTION < Decimal("0.01"), "spread fraction"
 _require(MIN_NOTIONAL_USD == Decimal("1"), "minimum notional is one dollar")
 _require(SOFT_DAILY_PROFIT_TARGET_GBP == Decimal("1"), "soft target is £1")
 _require(ALLOWED_SYMBOLS == ("BTC/USD", "ETH/USD"), "universe is BTC/USD and ETH/USD")
-_require(len(MULTI_STRATEGY_SYMBOLS) == 20, "multi-strategy universe is twenty symbols")
+_require(len(MULTI_STRATEGY_SYMBOLS) >= 1, "multi-strategy universe cannot be empty")
 _require(len(set(MULTI_STRATEGY_SYMBOLS)) == len(MULTI_STRATEGY_SYMBOLS), "multi-strategy symbols must be unique")
 _require(not (set(ALLOWED_SYMBOLS) & set(MULTI_STRATEGY_SYMBOLS)), "crypto and equity universes stay separate")
-_require(len(MULTI_STRATEGY_IDS) == 7, "seven paper strategies")
+_require(len(MULTI_STRATEGY_CATALOG) >= 1, "strategy catalog cannot be empty")
+_require(len(set(MULTI_STRATEGY_CATALOG)) == len(MULTI_STRATEGY_CATALOG), "catalog ids must be unique")
+_require(len(MULTI_STRATEGY_IDS) >= 1, "at least one strategy must be enabled")
 _require(len(set(MULTI_STRATEGY_IDS)) == len(MULTI_STRATEGY_IDS), "strategy ids must be unique")
+_require(set(MULTI_STRATEGY_IDS) <= set(MULTI_STRATEGY_CATALOG), "enabled strategies must be in the catalog")
 
 
 def normalize_symbol(value: str) -> str:

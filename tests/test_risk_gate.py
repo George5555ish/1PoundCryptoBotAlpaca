@@ -44,7 +44,9 @@ class RiskGateTests(unittest.TestCase):
         self.assertEqual(config.ALLOWED_SYMBOLS, ("BTC/USD", "ETH/USD"))
         self.assertEqual(config.MAX_RISK_FRACTION, Decimal("0.01"))
         self.assertEqual(config.DAILY_LOSS_FRACTION, Decimal("0.03"))
-        self.assertEqual(config.MAX_OPEN_POSITIONS, 5)
+        self.assertEqual(config.MAX_OPEN_POSITIONS, 3)
+        self.assertEqual(config.DAILY_PROFIT_LOCK_FRACTION, Decimal("0.015"))
+        self.assertEqual(config.DAILY_PROFIT_GIVEBACK_FRACTION, Decimal("0.008"))
 
     def test_gate_does_not_read_the_soft_target(self) -> None:
         source = Path(risk_gate.__file__).read_text(encoding="utf-8")
@@ -90,6 +92,25 @@ class RiskGateTests(unittest.TestCase):
         self.assertFalse(risk_gate.daily_loss_halted("9700.01", "10000"))
         self.assertTrue(risk_gate.daily_loss_halted(None, "10000"))
 
+    def test_exit_still_allowed_during_profit_lock(self) -> None:
+        position = risk_gate.OpenPosition(symbol="ETH/USD", qty=Decimal("0.5"))
+        decision = risk_gate.evaluate(
+            _request(
+                action="exit",
+                symbol="ETH/USD",
+                direction="long",
+                equity="101500",
+                day_start_equity="100000",
+                buying_power="101500",
+                open_positions=(position,),
+                stop_price=None,
+                target_price=None,
+                profit_lock_active=True,
+            )
+        )
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.order_kind, risk_gate.ORDER_KIND_EXIT)
+
     def test_exit_still_allowed_during_halt(self) -> None:
         position = risk_gate.OpenPosition(symbol="ETH/USD", qty=Decimal("0.5"))
         decision = risk_gate.evaluate(
@@ -121,14 +142,31 @@ class RiskGateTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertIn("already have this symbol", decision.reason)
 
-    def test_fifth_position_fills_the_book(self) -> None:
+    def test_third_position_fills_the_book(self) -> None:
         held = tuple(
             risk_gate.OpenPosition(symbol=f"X{index}/USD", qty=Decimal("1"))
-            for index in range(5)
+            for index in range(3)
         )
         decision = risk_gate.evaluate(_request(open_positions=held))
         self.assertFalse(decision.approved)
-        self.assertIn("max open positions is 5", decision.reason)
+        self.assertIn("max open positions is 3", decision.reason)
+
+    def test_daily_profit_lock_blocks_new_entries(self) -> None:
+        under = risk_gate.evaluate(_request(equity="101499.99", day_start_equity="100000"))
+        exact = risk_gate.evaluate(_request(equity="101500", day_start_equity="100000"))
+        latched = risk_gate.evaluate(
+            _request(equity="101000", day_start_equity="100000", profit_lock_active=True)
+        )
+        self.assertTrue(under.approved)
+        self.assertFalse(exact.approved)
+        self.assertIn("daily profit lock: +1.5% reached", exact.reason)
+        self.assertFalse(latched.approved)
+        self.assertIn("daily profit lock: +1.5% reached", latched.reason)
+        self.assertTrue(risk_gate.daily_profit_hit("101500", "100000"))
+        self.assertFalse(risk_gate.daily_profit_hit("101499.99", "100000"))
+        self.assertTrue(risk_gate.daily_profit_giveback("100799.99", "100000", locked=True))
+        self.assertFalse(risk_gate.daily_profit_giveback("100800", "100000", locked=True))
+        self.assertFalse(risk_gate.daily_profit_giveback("100000", "100000", locked=False))
 
     def test_pending_buy_blocks_only_that_symbol(self) -> None:
         blocked = risk_gate.evaluate(_request(pending_symbols=("BTC/USD",)))

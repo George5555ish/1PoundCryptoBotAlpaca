@@ -11,7 +11,7 @@ Rules enforced here:
 - Symbol on a new entry must be BTC/USD or ETH/USD.
 - The market is 24/7. A weekend or overnight timestamp is not a reason to
   reject. A naive timestamp is.
-- At most five open positions in this universe. A position outside this
+- At most three open positions in this universe. A position outside this
   universe still blocks a new entry. A working buy occupies a slot only for
   its own symbol. The same symbol cannot be entered again while it is open.
 - Quantity comes from the stop distance. A full stop-out at the stop price,
@@ -21,6 +21,8 @@ Rules enforced here:
   entry. A caller-supplied entry price is ignored.
 - Daily loss at or beyond 3% of UTC-day-start equity halts new entries.
   Closing an open long is still allowed.
+- Daily profit at or beyond +1.5% of UTC-day-start equity, or a latched
+  profit lock for that UTC date, rejects new entries. Closes still pass.
 - An entry quote must be present, uncrossed, inside the spread guard, and fresh.
 - An order needs a non-empty reason.
 
@@ -121,6 +123,7 @@ class GateRequest:
     trading_blocked: bool
     now: datetime
     pending_symbols: tuple[str, ...] = ()
+    profit_lock_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -263,6 +266,45 @@ def daily_loss_halted(equity: object, day_start_equity: object) -> bool:
     return pnl <= -limit
 
 
+def _day_pnl(equity: object, day_start_equity: object) -> Decimal | None:
+    try:
+        current = _money(equity, "equity")
+        start = _money(day_start_equity, "day-start equity")
+    except _BadNumber:
+        return None
+    return current - start
+
+
+def daily_profit_hit(equity: object, day_start_equity: object) -> bool:
+    """True when day P/L has reached +1.5% of day-start equity."""
+
+    pnl = _day_pnl(equity, day_start_equity)
+    if pnl is None:
+        return False
+    try:
+        start = _money(day_start_equity, "day-start equity")
+    except _BadNumber:
+        return False
+    lock = (start * config.DAILY_PROFIT_LOCK_FRACTION).quantize(config.CENT, rounding=ROUND_DOWN)
+    return pnl >= lock
+
+
+def daily_profit_giveback(equity: object, day_start_equity: object, *, locked: bool) -> bool:
+    """True when a latched +1.5% lock has given back below +0.8%."""
+
+    if not locked:
+        return False
+    pnl = _day_pnl(equity, day_start_equity)
+    if pnl is None:
+        return True
+    try:
+        start = _money(day_start_equity, "day-start equity")
+    except _BadNumber:
+        return True
+    floor = (start * config.DAILY_PROFIT_GIVEBACK_FRACTION).quantize(config.CENT, rounding=ROUND_DOWN)
+    return pnl < floor
+
+
 def _quote_ok(request: GateRequest, ask: Decimal, failures: list[str]) -> Decimal | None:
     try:
         bid = _money(request.bid, "bid")
@@ -372,6 +414,8 @@ def _evaluate_entry(request: GateRequest, symbol: str, model_reason: str) -> Ris
         failures.append(f"max open positions is {config.MAX_OPEN_POSITIONS}")
     if daily_loss_halted(request.equity, request.day_start_equity):
         failures.append("daily loss halt is in effect for this UTC day")
+    if request.profit_lock_active or daily_profit_hit(request.equity, request.day_start_equity):
+        failures.append(config.DAILY_PROFIT_LOCK_REASON)
 
     try:
         ask = _money(request.ask, "ask")

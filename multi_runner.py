@@ -212,6 +212,8 @@ def _flush_cycle(
     rows: list[dict[str, object]],
     webhook_url: str | None,
     next_open: datetime | None = None,
+    profit_lock: bool = False,
+    giveback: bool = False,
 ) -> None:
     """One n8n POST for the whole cycle. SQLite rows are already written."""
 
@@ -225,6 +227,8 @@ def _flush_cycle(
                 "day_start_equity": day_start,
                 "day_pnl": format(pnl, "f"),
                 "session": session,
+                "profit_lock": profit_lock,
+                "giveback": giveback,
                 "next_open": None if next_open is None else next_open.isoformat(),
                 "scanned": summary.get("scanned", 0),
                 "signals": summary.get("signals", 0),
@@ -272,6 +276,13 @@ def run_cycle(
         pnl = Decimal(account.equity) - Decimal(day_start)
     except Exception:
         pnl = Decimal("0")
+    lock_on, giveback = decisions.apply_profit_lock(now, account.equity, day_start)
+    flatten_reason = "flatten before the US cash close; DAY brackets expire"
+    if giveback and status != "closed":
+        if status == "open":
+            status = "flatten"
+        if not flatten_window(now):
+            flatten_reason = config.DAILY_PROFIT_GIVEBACK_REASON
     logger.info("MODE %s", "paper-send" if allow_send else "dry-run")
     logger.info(
         "MULTI_CYCLE equity=%s day_start=%s positions=%s session=%s next_open=%s strategies=%s",
@@ -310,13 +321,15 @@ def run_cycle(
             "next_open": next_open.isoformat() if status == "closed" else None,
         }
         logger.info(
-            "MULTI_SUMMARY scanned=%s signals=%s approved=%s rejected=%s session=%s sleep=%s",
+            "MULTI_SUMMARY scanned=%s signals=%s approved=%s rejected=%s session=%s sleep=%s profit_lock=%s giveback=%s",
             payload.get("scanned", 0),
             payload.get("signals", 0),
             payload.get("approved", 0),
             payload.get("rejected", 0),
             status,
             payload["sleep_seconds"],
+            lock_on,
+            giveback,
         )
         _flush_cycle(
             now=now,
@@ -329,6 +342,8 @@ def run_cycle(
             rows=cycle_rows,
             webhook_url=settings.n8n_webhook_url,
             next_open=next_open if status == "closed" else None,
+            profit_lock=lock_on,
+            giveback=giveback,
         )
         return payload
 
@@ -340,9 +355,56 @@ def run_cycle(
         )
         return finish({"scanned": 0, "signals": 0, "approved": 0, "rejected": 0})
 
+    if lock_on:
+        lock_reason = (
+            config.DAILY_PROFIT_GIVEBACK_REASON if giveback else config.DAILY_PROFIT_LOCK_REASON
+        )
+        logger.warning(
+            "DAILY_PROFIT_LOCK %s strategy_id=%s symbol=%s action=%s risk_gate_verdict=%s final_action=%s pnl=%s",
+            lock_reason,
+            "profit_lock",
+            "-",
+            "hold",
+            "no_trade",
+            "no_trade",
+            format(pnl, "f"),
+        )
+        cycle_rows.extend(
+            bot._commit(
+                decisions,
+                trading,
+                now,
+                {
+                    "as_of": now.isoformat(),
+                    "equity": account.equity,
+                    "day_start_equity": day_start,
+                    "strategy_id": "profit_lock",
+                    "symbol": None,
+                    "strategy_action": "hold",
+                },
+                None,
+                risk_gate.RiskDecision(
+                    verdict=risk_gate.VERDICT_NO_TRADE,
+                    approved=False,
+                    reason=lock_reason,
+                    model_reason="",
+                ),
+                False,
+                None,
+                book,
+                webhook_url=None,
+                action_type="entry_evaluation",
+                settings=settings,
+                post_webhook=False,
+            )
+        )
+
     if status == "flatten":
         held = ",".join(f"{item.symbol}:{item.side}" for item in book.positions) or "flat"
-        logger.warning("FLATTEN_FAILSAFE closing stock/ETF positions before the bell symbols=%s", held)
+        if giveback and flatten_reason == config.DAILY_PROFIT_GIVEBACK_REASON:
+            logger.warning("DAILY_PROFIT_GIVEBACK flattening open positions symbols=%s", held)
+        else:
+            logger.warning("FLATTEN_FAILSAFE closing stock/ETF positions before the bell symbols=%s", held)
 
     repairs = risk_gate.plan_repairs(book.positions, book.orders)
     if repairs:
@@ -399,7 +461,7 @@ def run_cycle(
                 current_price=position.current_price,
                 unrealized_pl=position.unrealized_pl,
                 decision="close",
-                reason="flatten before the US cash close; DAY brackets expire",
+                reason=flatten_reason,
                 trend=bot._trend_for(scan, position.symbol),
             )
             strategy_exit = None
@@ -415,7 +477,7 @@ def run_cycle(
                 side=position.side,
             )
             strategy_exit = None
-            if review.decision != "close" and view is not None:
+            if review.decision != "close" and view is not None and not lock_on:
                 strategy_exit = first_signal(position.symbol, view, enabled, held=True)
                 if strategy_exit is not None and strategy_exit.get("action") == "exit":
                     review = positions.PositionReview(
@@ -507,6 +569,8 @@ def run_cycle(
         return finish({"scanned": len(scan.views), "signals": 0, "approved": 1, "rejected": 0})
     if status == "flatten":
         return finish({"scanned": len(scan.views), "signals": 0, "approved": 0, "rejected": 0})
+    if lock_on:
+        return finish({"scanned": len(scan.views), "signals": 0, "approved": 0, "rejected": 0})
 
     held = {position.symbol for position in book.positions}
     pending = set(book.pending_symbols)
@@ -528,18 +592,28 @@ def run_cycle(
         context["strategy_id"] = payload.get("strategy_id")
         context["strategy_action"] = payload.get("action")
         context["strategy_reason"] = payload.get("reason")
-        decision = risk_gate.evaluate(bot._request_from(suggestion, account, day_start, book, view, now))
+        decision = risk_gate.evaluate(
+            bot._request_from(
+                suggestion,
+                account,
+                day_start,
+                book,
+                view,
+                now,
+                profit_lock_active=lock_on,
+            )
+        )
         if decision.approved:
             approved += 1
         else:
             rejected += 1
         logger.info(
-            "MULTI_SIGNAL symbol=%s strategy=%s action=%s approved=%s reason=%s",
-            symbol,
+            "MULTI_SIGNAL strategy_id=%s symbol=%s action=%s risk_gate_verdict=%s approved=%s",
             payload.get("strategy_id"),
+            symbol,
             payload.get("action"),
+            decision.verdict,
             decision.approved,
-            decision.reason,
         )
         refreshed = decision
         fresh_book = book
@@ -548,7 +622,15 @@ def run_cycle(
             fresh_scan = equity_scan.scan(data_client)
             fresh_view = fresh_scan.for_symbol(symbol)
             refreshed = risk_gate.evaluate(
-                bot._request_from(suggestion, account, day_start, fresh_book, fresh_view, datetime.now(timezone.utc))
+                bot._request_from(
+                    suggestion,
+                    account,
+                    day_start,
+                    fresh_book,
+                    fresh_view,
+                    datetime.now(timezone.utc),
+                    profit_lock_active=lock_on,
+                )
             )
         before = len(cycle_rows)
         cycle_rows.extend(
@@ -570,6 +652,14 @@ def run_cycle(
             )
         )
         filled = {str(row.get("final_action") or "") for row in cycle_rows[before:]}
+        logger.info(
+            "MULTI_SIGNAL strategy_id=%s symbol=%s action=%s risk_gate_verdict=%s final_action=%s",
+            payload.get("strategy_id"),
+            symbol,
+            payload.get("action"),
+            decision.verdict,
+            ",".join(sorted(filled)) or "-",
+        )
         occupy = decision.approved and ("submitted" in filled or "dry_run" in filled)
         if occupy:
             held.add(symbol)
