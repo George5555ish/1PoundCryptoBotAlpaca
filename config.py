@@ -92,6 +92,13 @@ DAILY_PROFIT_GIVEBACK_FRACTION = Decimal("0.008")
 DAILY_PROFIT_LOCK_REASON = "daily profit lock: +1.5% reached"
 DAILY_PROFIT_GIVEBACK_REASON = "daily profit lock: giveback below +0.8% after +1.5%"
 
+# Per open stock/ETF: if price has moved this far against avg entry, close
+# that name immediately. This is a percentage of the stock's entry, not of
+# account equity. Edit the fraction to change the cut. 1% per-trade risk
+# and the 3% daily loss halt are unchanged.
+POSITION_LOSS_CLOSE_FRACTION = Decimal("0.02")
+POSITION_LOSS_CLOSE_REASON = "unrealized loss reached -2% from entry; closing immediately"
+
 # No leverage. Notional cannot exceed the smaller of equity and buying power.
 MAX_POSITION_FRACTION = Decimal("1")
 
@@ -150,6 +157,10 @@ _require(
     Decimal("0") < DAILY_PROFIT_GIVEBACK_FRACTION < DAILY_PROFIT_LOCK_FRACTION,
     "giveback must sit below the profit lock",
 )
+_require(
+    Decimal("0") < POSITION_LOSS_CLOSE_FRACTION <= Decimal("0.10"),
+    "per-position loss cut must be between 0 and 10%",
+)
 _require(MAX_POSITION_FRACTION == Decimal("1"), "V1 does not use leverage")
 _require(Decimal("0") < MIN_STOP_FRACTION < MAX_RISK_FRACTION, "min stop fraction")
 _require(Decimal("0") < SLIPPAGE_ALLOWANCE_FRACTION < MIN_STOP_FRACTION, "slippage fraction")
@@ -193,6 +204,16 @@ def is_managed_symbol(value: str) -> bool:
     """Crypto pairs plus the multi-strategy equity list."""
 
     return is_allowed_symbol(value) or is_multi_strategy_symbol(value)
+
+
+def is_crypto_symbol(value: str) -> bool:
+    return is_allowed_symbol(value)
+
+
+def is_equity_hold(value: str) -> bool:
+    """Any non-crypto position. Used so leftovers outside the active list still flatten."""
+
+    return not is_crypto_symbol(value)
 
 
 def require_interval(seconds: int) -> int:

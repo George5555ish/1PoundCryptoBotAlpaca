@@ -117,15 +117,78 @@ def cycle_sleep_seconds(now: datetime, interval: int, status: str) -> int:
 
     wait = max(config.MIN_LOOP_INTERVAL_SECONDS, int(interval))
     if status == "flatten":
-        if flatten_window(now) or cash_session_open(now):
-            return config.MIN_LOOP_INTERVAL_SECONDS
-        return CLOSED_HEARTBEAT_SECONDS
+        return config.MIN_LOOP_INTERVAL_SECONDS
     if status != "closed":
         return wait
     remaining = int((next_cash_open(now) - _aware(now)).total_seconds()) - WAKE_BEFORE_OPEN_SECONDS
     if remaining <= 0:
         return config.MIN_LOOP_INTERVAL_SECONDS
-    return max(config.MIN_LOOP_INTERVAL_SECONDS, min(CLOSED_HEARTBEAT_SECONDS, remaining))
+    return max(config.MIN_LOOP_INTERVAL_SECONDS, min(wait, remaining))
+
+
+def _no_trade_decision(reason: str, symbol: str | None = None) -> risk_gate.RiskDecision:
+    return risk_gate.RiskDecision(
+        verdict=risk_gate.VERDICT_NO_TRADE,
+        approved=False,
+        reason=reason,
+        model_reason="",
+        symbol=symbol,
+    )
+
+
+def _append_no_trade(
+    cycle_rows: list[dict[str, object]],
+    *,
+    decisions: decision_log.DecisionLog,
+    trading,
+    now: datetime,
+    account,
+    day_start: str,
+    book,
+    settings: config.Settings,
+    symbol: str | None,
+    strategy_id: str,
+    reason: str,
+) -> None:
+    """SQLite + sheet row for a hold. Never sends an order."""
+
+    logger.info(
+        "MULTI_SIGNAL strategy_id=%s symbol=%s action=%s risk_gate_verdict=%s final_action=%s",
+        strategy_id,
+        symbol or "-",
+        "hold",
+        "no_trade",
+        "no_trade",
+    )
+    cycle_rows.extend(
+        bot._commit(
+            decisions,
+            trading,
+            now,
+            {
+                "as_of": now.isoformat(),
+                "equity": account.equity,
+                "day_start_equity": day_start,
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "strategy_action": "hold",
+                "strategy_reason": reason,
+            },
+            None,
+            _no_trade_decision(reason, symbol),
+            False,
+            None,
+            book,
+            webhook_url=None,
+            action_type="entry_evaluation",
+            settings=settings,
+            post_webhook=False,
+        )
+    )
+
+
+def _logged_symbols(rows: list[dict[str, object]]) -> set[str]:
+    return {str(row.get("symbol")) for row in rows if row.get("symbol")}
 
 
 def _price_text(value: object) -> str | None:
@@ -269,7 +332,7 @@ def run_cycle(
     day_start = decisions.day_start_equity(now, account.equity)
     book = execution.fetch_book(trading, include_equities=True)
     broker_open = _broker_open(trading)
-    holding_equity = any(config.is_multi_strategy_symbol(item.symbol) for item in book.positions)
+    holding_equity = any(config.is_equity_hold(item.symbol) for item in book.positions)
     status = session_status(now, broker_open, holding_equity=holding_equity)
     next_open = next_cash_open(now)
     try:
@@ -313,7 +376,35 @@ def run_cycle(
 
     cycle_rows: list[dict[str, object]] = []
 
+    def heartbeat_reason() -> tuple[str, str]:
+        if status == "closed":
+            return "session_idle", f"US cash session closed; next_open={next_open.isoformat()}"
+        if giveback:
+            return "profit_lock", config.DAILY_PROFIT_GIVEBACK_REASON
+        if lock_on:
+            return "profit_lock", config.DAILY_PROFIT_LOCK_REASON
+        if status == "flatten":
+            return "flatten", flatten_reason
+        return "no_signal", "no enabled strategy signaled"
+
     def finish(summary: dict[str, int]) -> dict[str, object]:
+        strategy_id, reason = heartbeat_reason()
+        for symbol in config.MULTI_STRATEGY_SYMBOLS:
+            if symbol in _logged_symbols(cycle_rows):
+                continue
+            _append_no_trade(
+                cycle_rows,
+                decisions=decisions,
+                trading=trading,
+                now=now,
+                account=account,
+                day_start=day_start,
+                book=book,
+                settings=settings,
+                symbol=symbol,
+                strategy_id=strategy_id,
+                reason=reason,
+            )
         payload = {
             **summary,
             "session": status,
@@ -348,12 +439,21 @@ def run_cycle(
         return payload
 
     if status == "closed":
-        logger.info(
-            "SESSION_IDLE next_open=%s positions=%s",
-            next_open.isoformat(),
-            len(book.positions),
-        )
-        return finish({"scanned": 0, "signals": 0, "approved": 0, "rejected": 0})
+        leftover_equity = [item for item in book.positions if config.is_equity_hold(item.symbol)]
+        if leftover_equity:
+            status = "flatten"
+            flatten_reason = "leftover stock/ETF position cannot idle after the US cash close"
+            logger.warning(
+                "FLATTEN_FAILSAFE leftover equity while session was idle symbols=%s",
+                ",".join(f"{item.symbol}:{item.side}" for item in leftover_equity),
+            )
+        else:
+            logger.info(
+                "SESSION_IDLE next_open=%s positions=%s",
+                next_open.isoformat(),
+                len(book.positions),
+            )
+            return finish({"scanned": 0, "signals": 0, "approved": 0, "rejected": 0})
 
     if lock_on:
         lock_reason = (
@@ -368,35 +468,6 @@ def run_cycle(
             "no_trade",
             "no_trade",
             format(pnl, "f"),
-        )
-        cycle_rows.extend(
-            bot._commit(
-                decisions,
-                trading,
-                now,
-                {
-                    "as_of": now.isoformat(),
-                    "equity": account.equity,
-                    "day_start_equity": day_start,
-                    "strategy_id": "profit_lock",
-                    "symbol": None,
-                    "strategy_action": "hold",
-                },
-                None,
-                risk_gate.RiskDecision(
-                    verdict=risk_gate.VERDICT_NO_TRADE,
-                    approved=False,
-                    reason=lock_reason,
-                    model_reason="",
-                ),
-                False,
-                None,
-                book,
-                webhook_url=None,
-                action_type="entry_evaluation",
-                settings=settings,
-                post_webhook=False,
-            )
         )
 
     if status == "flatten":
@@ -450,7 +521,7 @@ def run_cycle(
 
     closed_any = False
     for position in book.positions:
-        if status == "flatten" and not config.is_multi_strategy_symbol(position.symbol):
+        if status == "flatten" and config.is_crypto_symbol(position.symbol):
             continue
         stop, target = decisions.latest_entry_levels(position.symbol)
         view = scan.for_symbol(position.symbol)
@@ -475,6 +546,8 @@ def run_cycle(
                 stop_price=stop,
                 target_price=target,
                 side=position.side,
+                avg_entry_price=position.avg_entry_price,
+                unrealized_plpc=position.unrealized_plpc,
             )
             strategy_exit = None
             if review.decision != "close" and view is not None and not lock_on:
@@ -557,7 +630,7 @@ def run_cycle(
             leftover = [
                 f"{item.symbol}:{item.side}"
                 for item in execution.fetch_book(trading, include_equities=True).positions
-                if config.is_multi_strategy_symbol(item.symbol)
+                if config.is_equity_hold(item.symbol)
             ]
         except Exception:
             logger.exception("FLATTEN_INCOMPLETE could not re-read the book")
@@ -582,9 +655,35 @@ def run_cycle(
             continue
         view = scan.for_symbol(symbol)
         if view is None:
+            _append_no_trade(
+                cycle_rows,
+                decisions=decisions,
+                trading=trading,
+                now=now,
+                account=account,
+                day_start=day_start,
+                book=book,
+                settings=settings,
+                symbol=symbol,
+                strategy_id="no_signal",
+                reason="no quote this cycle",
+            )
             continue
         payload = first_signal(symbol, view, enabled, held=False)
         if payload is None:
+            _append_no_trade(
+                cycle_rows,
+                decisions=decisions,
+                trading=trading,
+                now=now,
+                account=account,
+                day_start=day_start,
+                book=book,
+                settings=settings,
+                symbol=symbol,
+                strategy_id="no_signal",
+                reason="no enabled strategy signaled",
+            )
             continue
         signals += 1
         suggestion = suggestion_from(symbol, payload)

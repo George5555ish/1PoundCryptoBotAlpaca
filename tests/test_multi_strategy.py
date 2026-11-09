@@ -85,6 +85,12 @@ class MultiStrategyGateTests(unittest.TestCase):
         self.assertFalse(decision.approved)
         self.assertIn("already have this symbol", decision.reason)
 
+    def test_equity_leftovers_outside_the_active_list_still_count_as_holds(self) -> None:
+        self.assertTrue(config.is_equity_hold("IWM"))
+        self.assertTrue(config.is_equity_hold("SPY"))
+        self.assertFalse(config.is_equity_hold("BTC/USD"))
+        self.assertTrue(config.is_crypto_symbol("ETH/USD"))
+
     def test_spy_is_outside_the_active_universe(self) -> None:
         decision = risk_gate.evaluate(
             _request(

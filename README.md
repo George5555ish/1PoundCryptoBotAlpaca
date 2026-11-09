@@ -122,11 +122,13 @@ Each cycle runs the enabled rule-based strategies in `strategies/`. The default 
 
 When UTC-day P/L reaches +1.5% of `day_start_equity`, new entries stop for the rest of that UTC day (`daily profit lock: +1.5% reached`). If P/L later falls below +0.8% after that lock, every open stock/ETF is flattened and the day stays halted.
 
+Each open stock/ETF is also checked against average entry. If unrealized P/L reaches `-POSITION_LOSS_CLOSE_FRACTION` (default **-2% from entry**), that name is closed immediately through the Risk Gate. Change the fraction in `config.py`. This does not replace the 1% equity stop or the 3% daily loss halt.
+
 US cash hours are 09:30–16:00 America/New_York, weekdays, and the Alpaca clock must not be closed (holidays and early closes count). Stock brackets are DAY orders, so they expire at the bell:
 
 - During the session: scan, enter, and review as usual, every `LOOP_INTERVAL_SECONDS`.
-- Last 20 minutes before the close: no new entries. Every stock/ETF position is flattened. The loop retries every 15 seconds until the book is flat. An early broker close, or leftover names after the bell, also flatten instead of riding overnight.
-- Nights, weekends, and holidays with no leftover equity: no scan and no orders. One heartbeat webhook (`session=closed`, `next_open=…`), then sleep until the next open, waking at least every 30 minutes.
+- Last 20 minutes before the close: no new entries. Every stock/ETF position is flattened, including names left over from an older universe. The loop retries every 15 seconds until the book is flat. An early broker close, or leftover names after the bell, also flatten instead of idling. Crypto longs are left alone.
+- Nights, weekends, and holidays with no leftover equity: no scan and no orders. A heartbeat webhook still posts every `LOOP_INTERVAL_SECONDS` (default 5 minutes) with one `session_idle` sheet row per symbol (`strategy_trades` is never empty). Sleep is capped so the process wakes before the next 09:30 America/New_York open.
 
 ```powershell
 python main.py --once --multi-strategy
@@ -140,7 +142,7 @@ python main.py --once --multi-strategy --strategies anchored_vwap_mean_reversion
 
 Paper orders still need `--send-orders`. Stock entries use a day bracket on whole shares; Alpaca rejects a fractional bracket. Crypto entries stay on the original path.
 
-Each decision row and webhook payload includes `strategy_id`, `symbol`, `action`, `reason`, `stop_price`, `target_price`, `approved`, and `order_id`. The cycle prints `MULTI_SUMMARY scanned=… signals=… approved=… rejected=… session=…`. Charts are drawn for symbols that produce a non-hold signal. A closed-session cycle does not write per-symbol session-closed rows.
+Each decision row and webhook payload includes `strategy_id`, `symbol`, `action`, `reason`, `stop_price`, `target_price`, `approved`, `risk_gate_verdict`, and `final_action`. The cycle prints `MULTI_SUMMARY scanned=… signals=… approved=… rejected=… session=…`. Charts are drawn for symbols that produce a non-hold signal. A closed-session cycle still writes one `session_idle` hold row per symbol so n8n can Split Out `strategy_trades` onto the sheet.
 
 ## Tests
 

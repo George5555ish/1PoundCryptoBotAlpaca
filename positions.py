@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+import config
+
 
 @dataclass(frozen=True)
 class PositionReview:
@@ -36,6 +38,28 @@ def _number(value: object) -> Decimal | None:
     return number
 
 
+def signed_pnl_fraction(
+    *,
+    side: str,
+    current_price: str | None,
+    avg_entry_price: str | None,
+    unrealized_plpc: str | None = None,
+) -> Decimal | None:
+    """Return P/L as a fraction of entry. Negative is a loss for long or short."""
+
+    price = _number(current_price)
+    entry = _number(avg_entry_price)
+    if price is not None and entry is not None and entry > 0:
+        move = (price - entry) / entry
+        return -move if side == "short" else move
+    plpc = _number(unrealized_plpc)
+    if plpc is None:
+        return None
+    if abs(plpc) > 1:
+        return plpc / Decimal("100")
+    return plpc
+
+
 def review_position(
     *,
     symbol: str,
@@ -46,13 +70,15 @@ def review_position(
     stop_price: str | None,
     target_price: str | None,
     side: str = "long",
+    avg_entry_price: str | None = None,
+    unrealized_plpc: str | None = None,
 ) -> PositionReview:
     """Decide hold or close for one open position.
 
-    Longs close when the last price is at or below the tracked stop, when it
-    has reached the tracked target, or when the candle trend is "lower lows".
-    Shorts invert those prices and close on "higher highs". Missing prices
-    do not invent an exit.
+    Stock/ETF names also close immediately when unrealized P/L from average
+    entry reaches ``POSITION_LOSS_CLOSE_FRACTION`` (default -2%). Longs then
+    close on stop, target, or "lower lows". Shorts invert those prices and
+    close on "higher highs". Missing prices do not invent an exit.
     """
 
     price = _number(current_price)
@@ -60,8 +86,17 @@ def review_position(
     target = _number(target_price)
     trend_text = trend.strip() if isinstance(trend, str) and trend.strip() else None
     short = side == "short"
+    pnl_frac = signed_pnl_fraction(
+        side=side,
+        current_price=current_price,
+        avg_entry_price=avg_entry_price,
+        unrealized_plpc=unrealized_plpc,
+    )
 
-    if short and price is not None and stop is not None and price >= stop:
+    if config.is_equity_hold(symbol) and pnl_frac is not None and pnl_frac <= -config.POSITION_LOSS_CLOSE_FRACTION:
+        decision = "close"
+        reason = f"{config.POSITION_LOSS_CLOSE_REASON} pnl={format(pnl_frac, 'f')}"
+    elif short and price is not None and stop is not None and price >= stop:
         decision = "close"
         reason = "price is at or above the protective stop"
     elif short and price is not None and target is not None and price <= target:

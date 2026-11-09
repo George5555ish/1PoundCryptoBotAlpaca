@@ -145,8 +145,11 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertEqual(multi_runner.next_cash_open(friday_night), monday_open)
         self.assertEqual(
             multi_runner.cycle_sleep_seconds(friday_night, 300, "closed"),
-            multi_runner.CLOSED_HEARTBEAT_SECONDS,
+            300,
         )
+
+    def test_logged_symbols_ignore_blank_rows(self) -> None:
+        self.assertEqual(multi_runner._logged_symbols([{"symbol": "IWM"}, {"symbol": None}]), {"IWM"})
 
     def test_flatten_window_before_the_bell(self) -> None:
         from datetime import datetime, timezone
@@ -166,8 +169,14 @@ class StrategyEngineTests(unittest.TestCase):
         )
         self.assertEqual(
             multi_runner.cycle_sleep_seconds(after_close, 300, "flatten"),
-            multi_runner.CLOSED_HEARTBEAT_SECONDS,
+            config.MIN_LOOP_INTERVAL_SECONDS,
         )
+
+    def test_open_session_is_not_idle(self) -> None:
+        from datetime import datetime, timezone
+
+        monday_open = datetime(2026, 10, 26, 14, 0, tzinfo=timezone.utc)
+        self.assertEqual(multi_runner.session_status(monday_open, broker_open=True), "open")
 
     def test_holiday_clock_overrides_the_weekday_calendar(self) -> None:
         from datetime import datetime, timezone

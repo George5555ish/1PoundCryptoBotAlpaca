@@ -1,7 +1,7 @@
 # Railway service. If the git repository root is the parent folder, set
 # the service root directory to crypto-bot.
 #
-# Paper orders after the risk gate approves them, on the 20-symbol tester.
+# Paper orders after the risk gate approves them, on the stock/ETF tester.
 # The client still refuses a live Alpaca host. Run one replica only. The
 # process also serves GET / on PORT for the dashboard. A dry run uses:
 # python main.py --multi-strategy

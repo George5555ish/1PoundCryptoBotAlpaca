@@ -160,7 +160,14 @@ def fetch_book(client, *, include_equities: bool = False) -> PositionBook:
             getattr(getattr(position, "asset_class", ""), "value", getattr(position, "asset_class", ""))
         ).lower()
         canonical = config.normalize_symbol(raw_symbol)
-        if include_equities and config.is_multi_strategy_symbol(canonical) and side in {"long", "short"}:
+        equity_hold = include_equities and side in {"long", "short"} and (
+            config.is_multi_strategy_symbol(canonical)
+            or (
+                config.is_equity_hold(canonical)
+                and (not asset_class or asset_class not in {"crypto", "crypto_perp"})
+            )
+        )
+        if equity_hold:
             positions.append(
                 risk_gate.OpenPosition(
                     symbol=canonical,
@@ -168,6 +175,8 @@ def fetch_book(client, *, include_equities: bool = False) -> PositionBook:
                     side=side,
                     current_price=_text_number(getattr(position, "current_price", None)),
                     unrealized_pl=_text_number(getattr(position, "unrealized_pl", None)),
+                    avg_entry_price=_text_number(getattr(position, "avg_entry_price", None)),
+                    unrealized_plpc=_text_number(getattr(position, "unrealized_plpc", None)),
                 )
             )
             continue
@@ -255,7 +264,7 @@ def _close_symbol(client, symbol: str):
     """Close one position. Crypto slashes are encoded so the path stays one segment."""
 
     canonical = config.normalize_symbol(symbol)
-    if config.is_multi_strategy_symbol(canonical):
+    if config.is_equity_hold(canonical):
         return client.close_position(canonical)
     encoded = quote(canonical, safe="")
     from alpaca.trading.models import Order

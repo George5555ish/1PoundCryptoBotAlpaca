@@ -67,6 +67,8 @@ class OpenPosition:
     side: str = "long"
     current_price: str | None = None
     unrealized_pl: str | None = None
+    avg_entry_price: str | None = None
+    unrealized_plpc: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.symbol, str) or not self.symbol.strip():

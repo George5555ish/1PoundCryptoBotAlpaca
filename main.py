@@ -919,11 +919,12 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("STARTUP %s", exc)
             return 1
     logger.info(
-        "RISK_LIMITS max_risk=%s daily_loss=%s profit_lock=%s giveback=%s max_positions=%s symbols=%s window=%s",
+        "RISK_LIMITS max_risk=%s daily_loss=%s profit_lock=%s giveback=%s position_loss_cut=%s max_positions=%s symbols=%s window=%s",
         config.MAX_RISK_FRACTION,
         config.DAILY_LOSS_FRACTION,
         config.DAILY_PROFIT_LOCK_FRACTION,
         config.DAILY_PROFIT_GIVEBACK_FRACTION,
+        config.POSITION_LOSS_CLOSE_FRACTION,
         config.MAX_OPEN_POSITIONS,
         ",".join(config.MULTI_STRATEGY_SYMBOLS if args.multi_strategy else config.ALLOWED_SYMBOLS),
         "US cash 09:30-16:00 America/New_York" if args.multi_strategy else "24/7 UTC",
