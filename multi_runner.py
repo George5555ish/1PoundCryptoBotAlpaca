@@ -146,11 +146,12 @@ def _append_no_trade(
     day_start: str,
     book,
     settings: config.Settings,
+    allow_send: bool,
     symbol: str | None,
     strategy_id: str,
     reason: str,
 ) -> None:
-    """SQLite + sheet row for a hold. Never sends an order."""
+    """SQLite + sheet row for a hold. A no_trade verdict still sends nothing."""
 
     logger.info(
         "MULTI_SIGNAL strategy_id=%s symbol=%s action=%s risk_gate_verdict=%s final_action=%s",
@@ -176,7 +177,7 @@ def _append_no_trade(
             },
             None,
             _no_trade_decision(reason, symbol),
-            False,
+            allow_send,
             None,
             book,
             webhook_url=None,
@@ -401,6 +402,7 @@ def run_cycle(
                 day_start=day_start,
                 book=book,
                 settings=settings,
+                allow_send=allow_send,
                 symbol=symbol,
                 strategy_id=strategy_id,
                 reason=reason,
@@ -664,6 +666,7 @@ def run_cycle(
                 day_start=day_start,
                 book=book,
                 settings=settings,
+                allow_send=allow_send,
                 symbol=symbol,
                 strategy_id="no_signal",
                 reason="no quote this cycle",
@@ -680,6 +683,7 @@ def run_cycle(
                 day_start=day_start,
                 book=book,
                 settings=settings,
+                allow_send=allow_send,
                 symbol=symbol,
                 strategy_id="no_signal",
                 reason="no enabled strategy signaled",
