@@ -281,6 +281,8 @@ def _commit(
     stored_context["action_type"] = action_type
     if context.get("strategy_id"):
         stored_context["strategy_id"] = context.get("strategy_id")
+    if settings is not None and settings.live_trading:
+        stored_context["live_money"] = True
     sheet_rows: list[dict[str, object]] = []
 
     def _store(**kwargs) -> int:
@@ -614,7 +616,7 @@ def run_cycle(trading, data_client, decisions: decision_log.DecisionLog, setting
         pnl = Decimal(account.equity) - Decimal(day_start)
     except Exception:
         pnl = Decimal("0")
-    logger.info("MODE %s", "paper-send" if allow_send else "dry-run")
+    logger.info("MODE %s", config.send_mode(allow_send=allow_send, live_trading=settings.live_trading))
     logger.info(
         "CYCLE equity=%s day_start=%s positions=%s other=%s pending=%s blocked=%s",
         account.equity,
@@ -627,7 +629,7 @@ def run_cycle(trading, data_client, decisions: decision_log.DecisionLog, setting
     logger.info("SOFT_TARGET %s", config.format_soft_target_note(pnl, settings.pounds_per_usd))
     SNAPSHOT.update(
         as_of=now.isoformat(),
-        mode="paper-send" if allow_send else "dry-run",
+        mode=config.send_mode(allow_send=allow_send, live_trading=settings.live_trading),
         equity=account.equity,
         day_start_equity=day_start,
         day_pnl=format(pnl, "f"),
@@ -867,12 +869,14 @@ def run_cycle(trading, data_client, decisions: decision_log.DecisionLog, setting
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Alpaca paper crypto bot. Dry-run unless --send-orders.")
+    parser = argparse.ArgumentParser(
+        description="Alpaca bot. Dry-run unless --send-orders. Paper host unless --live-money."
+    )
     parser.add_argument("--once", action="store_true", help="Run a single cycle and exit.")
     parser.add_argument(
         "--send-orders",
         action="store_true",
-        help="Send approved paper orders. Without this flag every cycle is a dry run.",
+        help="Send approved orders. Without this flag every cycle is a dry run. Paper unless --live-money.",
     )
     parser.add_argument("--interval", type=int, default=None, help="Seconds between cycles.")
     parser.add_argument(
@@ -885,6 +889,11 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Comma-separated strategy ids for --multi-strategy. Default is MULTI_STRATEGY_IDS in config.py.",
     )
+    parser.add_argument(
+        "--live-money",
+        action="store_true",
+        help="Use the live Alpaca account. Requires ALPACA_PAPER=false, ALPACA_LIVE_CONFIRM=I_UNDERSTAND_LIVE_MONEY, live keys, and --send-orders.",
+    )
     args = parser.parse_args(argv)
 
     from pathlib import Path
@@ -894,7 +903,10 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
     configure_logging(config.data_directory())
     try:
-        settings = config.load_settings(require_model_key=not args.multi_strategy)
+        settings = config.load_settings(
+            require_model_key=not args.multi_strategy,
+            live_requested=args.live_money,
+        )
     except Exception as exc:
         logger.error("STARTUP %s", exc)
         return 1
@@ -906,7 +918,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("STARTUP %s", exc)
         return 1
 
-    logger.warning("MODE %s", "paper-send" if args.send_orders else "dry-run")
+    if args.live_money and not args.send_orders:
+        logger.error("LIVE_MONEY requires --send-orders")
+        return 1
+    if settings.live_trading:
+        logger.critical("LIVE_MONEY orders will go to the real Alpaca brokerage account")
+    logger.warning(
+        "MODE %s",
+        config.send_mode(allow_send=args.send_orders, live_trading=settings.live_trading),
+    )
     logger.info("STARTUP %s", settings)
     selected = tuple(item.strip() for item in args.strategies.split(",") if item.strip())
     strategy_ids = None

@@ -124,6 +124,8 @@ MIN_NOTIONAL_USD = Decimal("1")
 SOFT_DAILY_PROFIT_TARGET_GBP = Decimal("1")
 
 PAPER_TRADING_BASE_URL = "https://paper-api.alpaca.markets"
+LIVE_TRADING_BASE_URL = "https://api.alpaca.markets"
+LIVE_CONFIRM_VALUE = "I_UNDERSTAND_LIVE_MONEY"
 
 DEFAULT_LOOP_INTERVAL_SECONDS = 300
 MIN_LOOP_INTERVAL_SECONDS = 15
@@ -264,12 +266,38 @@ def decisions_db_path(environ: dict[str, str] | None = None) -> Path:
     return data_directory(source) / "decisions.db"
 
 
+def trading_base_url(*, live: bool) -> str:
+    return LIVE_TRADING_BASE_URL if live else PAPER_TRADING_BASE_URL
+
+
 def assert_paper_trading_url(url: str) -> None:
     """Refuse any trading host other than Alpaca paper."""
 
+    assert_trading_url(url, live=False)
+
+
+def assert_trading_url(url: str, *, live: bool) -> None:
+    """Refuse a host that does not match paper vs live."""
+
     parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != "paper-api.alpaca.markets":
-        raise RuntimeError(f"trading URL must be the Alpaca paper host, got {url!r}")
+    expected = urlparse(trading_base_url(live=live)).hostname
+    if parsed.scheme != "https" or parsed.hostname != expected:
+        kind = "live" if live else "paper"
+        raise RuntimeError(f"trading URL must be the Alpaca {kind} host, got {url!r}")
+
+
+def send_mode(*, allow_send: bool, live_trading: bool) -> str:
+    """Process log label. ``live-send`` is real money; ``live`` in the sheet is paper send."""
+
+    if live_trading:
+        return "live-send"
+    return "paper-send" if allow_send else "dry-run"
+
+
+def sheet_mode(*, allow_send: bool, live_trading: bool) -> str:
+    if not allow_send:
+        return "dry-run"
+    return "live-money" if live_trading else "live"
 
 
 def _mask(secret: str) -> str:
@@ -304,10 +332,12 @@ class Settings:
     smtp_from: str | None
     dashboard_trades_webhook: str | None
     dashboard_port: int
+    live_trading: bool = False
 
     def __repr__(self) -> str:
         return (
             "Settings("
+            f"live_trading={self.live_trading}, "
             f"alpaca_api_key={_mask(self.alpaca_api_key)}, "
             f"alpaca_secret_key={_mask(self.alpaca_secret_key)}, "
             f"openai_api_key={_mask(self.openai_api_key)}, "
@@ -324,13 +354,18 @@ class Settings:
         )
 
 
-def load_settings(environ: dict[str, str] | None = None, *, require_model_key: bool = True) -> Settings:
-    """Load paper credentials and the model endpoint.
+def load_settings(
+    environ: dict[str, str] | None = None,
+    *,
+    require_model_key: bool = True,
+    live_requested: bool = False,
+) -> Settings:
+    """Load Alpaca credentials and the model endpoint.
 
-    ``ALPACA_PAPER`` must be true. A live flag aborts before a client exists.
-    When ``environ`` is omitted, values are read from the process environment
-    after a local ``.env`` file is loaded. An explicit mapping is used as-is
-    so tests do not touch the developer's ``.env``.
+    Paper is the default. Live trading requires ``ALPACA_PAPER=false``,
+    ``ALPACA_LIVE_CONFIRM=I_UNDERSTAND_LIVE_MONEY``, and ``live_requested``
+    (the ``--live-money`` flag). When ``environ`` is omitted, values are
+    read from the process environment after a local ``.env`` file is loaded.
     """
 
     if environ is None:
@@ -340,16 +375,30 @@ def load_settings(environ: dict[str, str] | None = None, *, require_model_key: b
         source = environ
 
     paper_flag = source.get("ALPACA_PAPER", "").strip().lower()
-    if paper_flag not in {"1", "true", "yes"}:
-        raise RuntimeError(
-            "ALPACA_PAPER must be true. This bot refuses to start when live trading is requested."
-        )
+    paper_on = paper_flag in {"1", "true", "yes"}
+    confirm = source.get("ALPACA_LIVE_CONFIRM", "").strip()
+    if live_requested:
+        if paper_on:
+            raise RuntimeError(
+                "--live-money requires ALPACA_PAPER=false and live Alpaca keys. Paper keys stay on paper."
+            )
+        if confirm != LIVE_CONFIRM_VALUE:
+            raise RuntimeError(
+                "live trading requires ALPACA_LIVE_CONFIRM=I_UNDERSTAND_LIVE_MONEY"
+            )
+        live_trading = True
+    else:
+        if not paper_on:
+            raise RuntimeError(
+                "ALPACA_PAPER must be true unless you pass --live-money with live keys and ALPACA_LIVE_CONFIRM."
+            )
+        live_trading = False
 
     alpaca_key = source.get("ALPACA_API_KEY", "").strip()
     alpaca_secret = source.get("ALPACA_SECRET_KEY", "").strip()
     openai_key = source.get("OPENAI_API_KEY", "").strip()
     if not alpaca_key or not alpaca_secret:
-        raise RuntimeError("ALPACA_API_KEY and ALPACA_SECRET_KEY are required. Use paper-trading keys.")
+        raise RuntimeError("ALPACA_API_KEY and ALPACA_SECRET_KEY are required.")
     if require_model_key and not openai_key:
         raise RuntimeError("OPENAI_API_KEY is required. Use a secret from https://platform.openai.com/api-keys.")
 
@@ -419,4 +468,5 @@ def load_settings(environ: dict[str, str] | None = None, *, require_model_key: b
         smtp_from=smtp_from or None,
         dashboard_trades_webhook=trades_webhook or None,
         dashboard_port=dashboard_port,
+        live_trading=live_trading,
     )

@@ -92,6 +92,48 @@ class ExecutionGuardTests(unittest.TestCase):
         config.assert_paper_trading_url("https://paper-api.alpaca.markets/v2")
         with self.assertRaises(RuntimeError):
             config.assert_paper_trading_url("https://api.alpaca.markets")
+        config.assert_trading_url("https://api.alpaca.markets", live=True)
+        with self.assertRaises(RuntimeError):
+            config.assert_trading_url("https://paper-api.alpaca.markets", live=True)
+        with self.assertRaises(RuntimeError):
+            config.assert_trading_url("https://api.alpaca.markets", live=False)
+
+    def test_load_settings_stays_paper_unless_live_is_fully_confirmed(self) -> None:
+        import config
+
+        paper = {
+            "ALPACA_PAPER": "true",
+            "ALPACA_API_KEY": "PKtest",
+            "ALPACA_SECRET_KEY": "secret",
+            "OPENAI_API_KEY": "sk-test",
+        }
+        settings = config.load_settings(paper, require_model_key=False)
+        self.assertFalse(settings.live_trading)
+        self.assertEqual(config.send_mode(allow_send=True, live_trading=False), "paper-send")
+        self.assertEqual(config.sheet_mode(allow_send=True, live_trading=False), "live")
+        with self.assertRaises(RuntimeError):
+            config.load_settings({**paper, "ALPACA_PAPER": "false"}, require_model_key=False)
+        with self.assertRaises(RuntimeError):
+            config.load_settings(paper, require_model_key=False, live_requested=True)
+        with self.assertRaises(RuntimeError):
+            config.load_settings(
+                {**paper, "ALPACA_PAPER": "false"},
+                require_model_key=False,
+                live_requested=True,
+            )
+        live = config.load_settings(
+            {
+                **paper,
+                "ALPACA_PAPER": "false",
+                "ALPACA_LIVE_CONFIRM": "I_UNDERSTAND_LIVE_MONEY",
+            },
+            require_model_key=False,
+            live_requested=True,
+        )
+        self.assertTrue(live.live_trading)
+        self.assertEqual(config.send_mode(allow_send=True, live_trading=True), "live-send")
+        self.assertEqual(config.sheet_mode(allow_send=True, live_trading=True), "live-money")
+        self.assertEqual(config.trading_base_url(live=True), "https://api.alpaca.markets")
 
 
 if __name__ == "__main__":

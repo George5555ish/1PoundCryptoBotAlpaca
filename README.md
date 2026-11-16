@@ -1,6 +1,6 @@
 # Crypto paper bot
 
-Separate from the ETF bot in `trading-bot/`. This process suggests a BTC/USD or ETH/USD trade, then a Python risk gate decides whether that suggestion is allowed. The model does not choose a quantity and it does not place orders. Orders go to an Alpaca paper account only, and only if you start the process with `--send-orders`.
+Separate from the ETF bot in `trading-bot/`. This process suggests a BTC/USD or ETH/USD trade, then a Python risk gate decides whether that suggestion is allowed. The model does not choose a quantity and it does not place orders. Orders go to an Alpaca paper account by default, and only if you start the process with `--send-orders`. Live money also needs `--live-money` and the confirmations in the Live money section.
 
 The market is treated as open 24 hours a day, including weekends. An open long may be held overnight. The daily loss clock is the UTC date, not the US equity session.
 
@@ -57,7 +57,7 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Put the paper key id in `ALPACA_API_KEY` and the paper secret in `ALPACA_SECRET_KEY`. `ALPACA_PAPER` must stay `true`.
+Put the paper key id in `ALPACA_API_KEY` and the paper secret in `ALPACA_SECRET_KEY`. Keep `ALPACA_PAPER=true` until you intentionally switch to live money.
 
 `OPENAI_API_KEY` is an OpenAI key from https://platform.openai.com/api-keys. It starts with `sk-`. Leave the base URL as `https://api.openai.com/v1` and the model as `gpt-4o`. `--multi-strategy` does not call the model; the enabled rules in `MULTI_STRATEGY_IDS` decide the trade.
 
@@ -94,7 +94,7 @@ python main.py --send-orders
 
 Startup says `MODE paper-send`, and every cycle logs that same mode line. Without the flag the line is `MODE dry-run` and no order is sent. An order is sent only when the gate approves it, a second read still approves the same symbol, side, quantity, stop, and target, and the client is still on the paper host.
 
-The flag cannot be turned on from an environment variable. Railway stays a dry run until the start command is `python main.py --send-orders`.
+The flag cannot be turned on from an environment variable. Railway stays a dry run until the start command includes `--send-orders`. Paper remains the default host.
 
 ## Open positions
 
@@ -158,10 +158,25 @@ The unit tests do not call Alpaca or a model.
 The image is a long-running worker that also serves a small page on `PORT`. Generate a Railway public domain for that page. Keep the service at one replica. Two copies would both read the same paper account.
 
 1. Push this directory. If the git root is the parent folder, set the Railway service root to `crypto-bot`.
-2. Railway reads `railway.toml` and builds the `Dockerfile`. The start command is `python main.py --send-orders`.
+2. Railway reads `railway.toml` and builds the `Dockerfile`. The start command is `python main.py --send-orders --multi-strategy`.
 3. Add the variables from `.env.example`: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER=true`, `OPENAI_API_KEY`, `OPENAI_BASE_URL=https://api.openai.com/v1`, `OPENAI_MODEL=gpt-4o`, and optionally `LOOP_INTERVAL_SECONDS`, `POUNDS_PER_USD`, `N8N_WEBHOOK_URL`.
 4. Add a volume mounted at `/data` and set `DATA_DIR=/data`. The database, `bot.log`, and chart PNGs are written there. Without the volume, a redeploy deletes `decisions.db`, including the UTC day-start equity used for the 3% halt.
-5. Confirm the logs show `MODE paper-send`. The sheet `mode` column should then say `live`. Orders still go only to the Alpaca paper host. A dry run uses the start command `python main.py`.
+5. Confirm the logs show `MODE paper-send`. The sheet `mode` column should then say `live`. That sheet label is paper send, not real money. A dry run uses the start command `python main.py --multi-strategy`.
 6. Open the public URL. `/` is the dashboard (equity, decision counts, last trades). `/api` is the same data as JSON. The last-five trades come from `DASHBOARD_TRADES_WEBHOOK` (default is the n8n call-agent URL). A failed fetch does not stop trading.
 
 Do not paste `.env` into the image. Railway variables are the secrets. `N8N_WEBHOOK_URL` can stay unset; the cycle logs a warning and continues.
+
+## Live money
+
+Paper recovery is not an edge. Risk stays 1% per trade and 3% UTC-day halt. The repo start command stays on paper.
+
+Live trading only starts when all of these are set together:
+
+1. Live Alpaca keys in `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` (not the paper pair).
+2. `ALPACA_PAPER=false`
+3. `ALPACA_LIVE_CONFIRM=I_UNDERSTAND_LIVE_MONEY`
+4. Start command `python main.py --send-orders --multi-strategy --live-money`
+
+Logs then say `MODE live-send`. The sheet `mode` column says `live-money`. One replica only. Shorts need a margin account and locates; paper buying power hid larger shorts than cash equity can carry. Pattern-day-trader rules apply under $25k. Use a separate n8n sheet for live rows so paper history is not mixed in.
+
+Leave `railway.toml` on the paper start command. Change the Railway service command and variables only when you intend to send real orders.

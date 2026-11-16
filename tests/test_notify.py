@@ -131,6 +131,29 @@ class WebhookTests(unittest.TestCase):
         self.assertIsNone(btc["position_decision"])
         self.assertIsNone(btc["trade_description"])
 
+    def test_live_money_sheet_mode(self) -> None:
+        when = datetime(2026, 10, 23, 11, 0, tzinfo=timezone.utc)
+        rows = notify.build_rows(
+            timestamp=when,
+            allow_send=True,
+            context={
+                "equity": "100.00",
+                "day_start_equity": "90.00",
+                "live_money": True,
+                "symbols": {"IWM": {}},
+            },
+            suggestion=None,
+            verdict="no_trade",
+            reason="hold",
+            approved=False,
+            final_action="no_trade",
+            order_id=None,
+            chart_filenames=[],
+            symbol="IWM",
+            risk_decision={"verdict": "no_trade"},
+        )
+        self.assertEqual(rows[0]["mode"], "live-money")
+
     def test_trade_event_is_only_on_the_traded_symbol(self) -> None:
         when = datetime(2026, 10, 23, 11, 0, tzinfo=timezone.utc)
         rows = notify.build_rows(

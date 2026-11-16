@@ -20,6 +20,8 @@ from decimal import Decimal
 from email.message import EmailMessage
 from typing import Mapping
 
+import config
+
 
 logger = logging.getLogger("notify")
 
@@ -156,15 +158,16 @@ def build_rows(
 ) -> list[dict[str, object]]:
     """Flat rows whose keys are the sheet columns, in column order.
 
-    ``allow_send`` true is ``live`` in the sheet. Orders still go only to the
-    Alpaca paper account; this flag means the process was started with
-    ``--send-orders``.
+    ``allow_send`` true is ``live`` in the sheet for paper, or ``live-money``
+    when the process is on the real Alpaca host. Without ``--send-orders``
+    the sheet says ``dry-run``.
     """
 
     when = timestamp if timestamp.tzinfo is not None else timestamp.replace(tzinfo=timezone.utc)
+    live_money = bool(context.get("live_money"))
     shared = {
         "timestamp_utc": when.astimezone(timezone.utc).isoformat(),
-        "mode": "live" if allow_send else "dry-run",
+        "mode": config.sheet_mode(allow_send=allow_send, live_trading=live_money),
         "equity": context.get("equity"),
         "day_start_equity": context.get("day_start_equity"),
         "day_pnl": _day_pnl(context),

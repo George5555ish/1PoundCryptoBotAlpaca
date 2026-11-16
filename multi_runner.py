@@ -278,6 +278,7 @@ def _flush_cycle(
     next_open: datetime | None = None,
     profit_lock: bool = False,
     giveback: bool = False,
+    live_trading: bool = False,
 ) -> None:
     """One n8n POST for the whole cycle. SQLite rows are already written."""
 
@@ -286,7 +287,7 @@ def _flush_cycle(
             {
                 "event_type": "multi_cycle",
                 "timestamp_utc": now.isoformat(),
-                "mode": "live" if allow_send else "dry-run",
+                "mode": config.sheet_mode(allow_send=allow_send, live_trading=live_trading),
                 "equity": account.equity,
                 "day_start_equity": day_start,
                 "day_pnl": format(pnl, "f"),
@@ -347,7 +348,7 @@ def run_cycle(
             status = "flatten"
         if not flatten_window(now):
             flatten_reason = config.DAILY_PROFIT_GIVEBACK_REASON
-    logger.info("MODE %s", "paper-send" if allow_send else "dry-run")
+    logger.info("MODE %s", config.send_mode(allow_send=allow_send, live_trading=settings.live_trading))
     logger.info(
         "MULTI_CYCLE equity=%s day_start=%s positions=%s session=%s next_open=%s strategies=%s",
         account.equity,
@@ -360,7 +361,7 @@ def run_cycle(
     logger.info("SOFT_TARGET %s", config.format_soft_target_note(pnl, settings.pounds_per_usd))
     bot.SNAPSHOT.update(
         as_of=now.isoformat(),
-        mode="paper-send" if allow_send else "dry-run",
+        mode=config.send_mode(allow_send=allow_send, live_trading=settings.live_trading),
         equity=account.equity,
         day_start_equity=day_start,
         day_pnl=format(pnl, "f"),
@@ -437,6 +438,7 @@ def run_cycle(
             next_open=next_open if status == "closed" else None,
             profit_lock=lock_on,
             giveback=giveback,
+            live_trading=settings.live_trading,
         )
         return payload
 

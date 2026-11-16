@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import config
 import risk_gate
@@ -68,17 +68,18 @@ def _url_text(value: object) -> str:
 
 
 def build_trading_client(settings: config.Settings):
-    """Paper trading client pinned to the Alpaca paper host."""
+    """Trading client pinned to paper or live according to ``settings``."""
 
     from alpaca.trading.client import TradingClient
 
+    live = bool(settings.live_trading)
     client = TradingClient(
         settings.alpaca_api_key,
         settings.alpaca_secret_key,
-        paper=True,
-        url_override=config.PAPER_TRADING_BASE_URL,
+        paper=not live,
+        url_override=config.trading_base_url(live=live),
     )
-    config.assert_paper_trading_url(_url_text(getattr(client, "_base_url", "")))
+    config.assert_trading_url(_url_text(getattr(client, "_base_url", "")), live=live)
     return client
 
 
@@ -256,8 +257,10 @@ def _protective_limit(stop_price: str) -> float:
     return float(limit)
 
 
-def _assert_paper(client) -> None:
-    config.assert_paper_trading_url(_url_text(getattr(client, "_base_url", "")))
+def _assert_broker_url(client) -> None:
+    host = urlparse(_url_text(getattr(client, "_base_url", ""))).hostname or ""
+    live = host == "api.alpaca.markets"
+    config.assert_trading_url(_url_text(getattr(client, "_base_url", "")), live=live)
 
 
 def _close_symbol(client, symbol: str):
@@ -332,7 +335,7 @@ def submit(client, decision: risk_gate.RiskDecision, allow_send: bool, book: Pos
         raise RuntimeError("refusing to send: allow_send is false")
     if not decision.approved:
         raise RuntimeError("refusing to send: decision is not approved")
-    _assert_paper(client)
+    _assert_broker_url(client)
 
     from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
     from alpaca.trading.requests import MarketOrderRequest, StopLimitOrderRequest
