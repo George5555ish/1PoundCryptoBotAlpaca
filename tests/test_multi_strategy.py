@@ -39,7 +39,6 @@ class MultiStrategyGateTests(unittest.TestCase):
         self.assertEqual(decision.symbol, "QQQ")
         self.assertLessEqual(Decimal(decision.planned_loss or "0"), Decimal("1000"))
         qty = Decimal(decision.qty or "0")
-        self.assertEqual(qty, qty.to_integral_value())
         self.assertGreater(qty, 0)
 
     def test_qqq_short_is_sized_from_the_stop_above(self) -> None:
@@ -66,6 +65,48 @@ class MultiStrategyGateTests(unittest.TestCase):
         )
         self.assertFalse(decision.approved)
         self.assertIn("long only", decision.reason)
+
+    def test_sixteen_dollars_can_buy_fractional_qqq(self) -> None:
+        decision = risk_gate.evaluate(
+            _request(
+                symbol="QQQ",
+                direction="long",
+                bid="499.90",
+                ask="500.00",
+                stop_price="495.00",
+                target_price="510.00",
+                equity="16",
+                day_start_equity="16",
+                buying_power="16",
+                now=NOW,
+                quote_time=NOW,
+            )
+        )
+        self.assertTrue(decision.approved, decision.reason)
+        qty = Decimal(decision.qty or "0")
+        self.assertGreater(qty, 0)
+        self.assertLess(qty, 1)
+        self.assertLessEqual(qty * Decimal("500"), Decimal("16"))
+        self.assertLessEqual(Decimal(decision.planned_loss or "0"), Decimal("0.16"))
+
+    def test_sixteen_dollars_cannot_short_a_whole_qqq_share(self) -> None:
+        decision = risk_gate.evaluate(
+            _request(
+                symbol="QQQ",
+                direction="short",
+                bid="499.90",
+                ask="500.00",
+                stop_price="505.00",
+                target_price="490.00",
+                equity="16",
+                day_start_equity="16",
+                buying_power="16",
+                now=NOW,
+                quote_time=NOW,
+            )
+        )
+        self.assertFalse(decision.approved)
+        self.assertIn("sizes the position to zero", decision.reason)
 
     def test_one_position_per_symbol(self) -> None:
         held = risk_gate.OpenPosition(symbol="QQQ", qty=Decimal("1"), side="long")

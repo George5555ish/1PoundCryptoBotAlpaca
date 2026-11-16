@@ -4,8 +4,9 @@ Each enabled strategy is a pure-Python rule. Enter and exit suggestions go
 through ``risk_gate.evaluate``. Nothing here sizes an order or calls the
 broker. ``main._commit`` is the only path that can send after a log row.
 
-US cash hours are 09:30–16:00 America/New_York, weekdays. Stock brackets are
-DAY orders, so they die at the close. That drives three modes:
+US cash hours are 09:30–16:00 America/New_York, weekdays. Stock entries are
+DAY market plus a DAY stop-limit, so they die at the close. That drives three
+modes:
 
 - ``open``: scan, enter, and review as usual.
 - ``flatten``: last 20 minutes of the session, an early broker close, or
@@ -342,7 +343,7 @@ def run_cycle(
     except Exception:
         pnl = Decimal("0")
     lock_on, giveback = decisions.apply_profit_lock(now, account.equity, day_start)
-    flatten_reason = "flatten before the US cash close; DAY brackets expire"
+    flatten_reason = "flatten before the US cash close; DAY stock orders expire"
     if giveback and status != "closed":
         if status == "open":
             status = "flatten"

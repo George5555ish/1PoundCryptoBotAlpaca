@@ -140,7 +140,7 @@ A subset of strategies (ids must be in `MULTI_STRATEGY_CATALOG`):
 python main.py --once --multi-strategy --strategies anchored_vwap_mean_reversion,ema_stack_pullback
 ```
 
-Paper orders still need `--send-orders`. Stock entries use a day bracket on whole shares; Alpaca rejects a fractional bracket. Crypto entries stay on the original path.
+Paper orders still need `--send-orders`. Stock longs are fractional simple DAY orders (market, then a DAY stop-limit). Alpaca rejects a fractional bracket, so there is no resting take-profit; the runner still closes at target, stop, or flatten. Shorts stay whole shares. Crypto entries stay on the original path.
 
 Each decision row and webhook payload includes `strategy_id`, `symbol`, `action`, `reason`, `stop_price`, `target_price`, `approved`, `risk_gate_verdict`, and `final_action`. The cycle prints `MULTI_SUMMARY scanned=… signals=… approved=… rejected=… session=…`. Charts are drawn for symbols that produce a non-hold signal. A closed-session cycle still writes one `session_idle` hold row per symbol so n8n can Split Out `strategy_trades` onto the sheet.
 

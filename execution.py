@@ -15,10 +15,11 @@ reach the network by accident.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from urllib.parse import quote, urlparse
 
 import config
@@ -246,12 +247,18 @@ def _client_order_id(symbol: str, purpose: str) -> str:
     return f"c1-{compact}-{purpose}-{stamp}-{uuid.uuid4().hex[:8]}"[:48]
 
 
-def _protective_limit(stop_price: str) -> float:
+def _protective_limit(stop_price: str, *, short: bool = False) -> float:
     stop = Decimal(stop_price)
-    raw = stop * (Decimal("1") - config.SLIPPAGE_ALLOWANCE_FRACTION)
-    limit = raw.quantize(config.CENT, rounding=ROUND_DOWN)
-    if limit >= stop:
-        limit = (stop - config.CENT).quantize(config.CENT, rounding=ROUND_DOWN)
+    if short:
+        raw = stop * (Decimal("1") + config.SLIPPAGE_ALLOWANCE_FRACTION)
+        limit = raw.quantize(config.CENT, rounding=ROUND_UP)
+        if limit <= stop:
+            limit = (stop + config.CENT).quantize(config.CENT, rounding=ROUND_UP)
+    else:
+        raw = stop * (Decimal("1") - config.SLIPPAGE_ALLOWANCE_FRACTION)
+        limit = raw.quantize(config.CENT, rounding=ROUND_DOWN)
+        if limit >= stop:
+            limit = (stop - config.CENT).quantize(config.CENT, rounding=ROUND_DOWN)
     if limit <= 0:
         raise RuntimeError("protective limit price is not positive")
     return float(limit)
@@ -276,8 +283,8 @@ def _close_symbol(client, symbol: str):
     return Order(**response)
 
 
-def stock_share_qty(qty: object) -> int:
-    """Whole shares for a stock bracket. Alpaca rejects fractional brackets."""
+def stock_qty(qty: object) -> Decimal:
+    """Fractional stock quantity, floored to EQUITY_QTY_QUANTUM."""
 
     try:
         number = Decimal(str(qty))
@@ -285,39 +292,102 @@ def stock_share_qty(qty: object) -> int:
         raise RuntimeError("stock quantity is not a number") from exc
     if not number.is_finite() or number <= 0:
         raise RuntimeError("stock quantity must be positive")
-    shares = int(number.to_integral_value(rounding=ROUND_DOWN))
+    shares = number.quantize(config.EQUITY_QTY_QUANTUM, rounding=ROUND_DOWN)
     if shares <= 0:
-        raise RuntimeError("stock bracket quantity must be a whole share")
+        raise RuntimeError("stock quantity is below the fractional step")
     return shares
 
 
+def _qty_field(qty: Decimal) -> str:
+    return format(qty, "f")
+
+
+def _await_stock_fill(client, order, *, timeout_seconds: float = 8.0):
+    """DAY market fills are often not on the submit response. Poll briefly."""
+
+    deadline = time.time() + timeout_seconds
+    current = order
+    while True:
+        filled = _dec(getattr(current, "filled_qty", None)) or Decimal("0")
+        status = str(getattr(current, "status", "") or "").lower()
+        if filled > 0 or status in {"filled", "canceled", "cancelled", "expired", "rejected", "replaced"}:
+            return current
+        if time.time() >= deadline:
+            return current
+        time.sleep(0.25)
+        current = client.get_order_by_id(str(current.id))
+
+
 def _submit_stock_entry(client, decision: risk_gate.RiskDecision) -> OrderResult:
-    """Paper stock/ETF entry: market parent plus stop and take-profit."""
+    """Stock/ETF entry: simple DAY market, then a DAY stop-limit on the fill.
+
+    Alpaca rejects fractional brackets and OCO, so the take-profit is not
+    resting. Position review and the flatten window still close at target.
+    """
 
     from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
-    from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
+    from alpaca.trading.requests import MarketOrderRequest, StopLimitOrderRequest
 
-    if not decision.symbol or not decision.qty or not decision.stop_price or not decision.target_price:
-        raise RuntimeError("stock entry is missing symbol, quantity, stop, or target")
-    side = OrderSide.BUY if decision.side == "buy" else OrderSide.SELL
-    shares = stock_share_qty(decision.qty)
-    order = client.submit_order(
+    if not decision.symbol or not decision.qty or not decision.stop_price:
+        raise RuntimeError("stock entry is missing symbol, quantity, or stop")
+    short = decision.side == "sell"
+    shares = stock_qty(decision.qty)
+    if short and shares != shares.to_integral_value():
+        raise RuntimeError("stock short quantity must be a whole share")
+    entry = client.submit_order(
         MarketOrderRequest(
             symbol=decision.symbol,
-            qty=shares,
-            side=side,
+            qty=_qty_field(shares),
+            side=OrderSide.SELL if short else OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
-            order_class=OrderClass.BRACKET,
-            take_profit=TakeProfitRequest(limit_price=float(decision.target_price)),
-            stop_loss=StopLossRequest(stop_price=float(decision.stop_price)),
+            order_class=OrderClass.SIMPLE,
             client_order_id=_client_order_id(decision.symbol, "eq"),
         )
     )
+    entry = _await_stock_fill(client, entry)
+    filled = _dec(getattr(entry, "filled_qty", None)) or Decimal("0")
+    entry_id = str(entry.id)
+    status = str(entry.status)
+    if filled <= 0:
+        return OrderResult(entry_id, status, "entry submitted with no fill; no protective stop placed")
+    stop_qty = filled.quantize(config.EQUITY_QTY_QUANTUM, rounding=ROUND_DOWN)
+    if short:
+        stop_qty = filled.to_integral_value(rounding=ROUND_DOWN)
+    if stop_qty <= 0:
+        return OrderResult(entry_id, status, "fill is below the quantity step; no protective stop placed")
+    try:
+        protection = client.submit_order(
+            StopLimitOrderRequest(
+                symbol=decision.symbol,
+                qty=_qty_field(stop_qty),
+                side=OrderSide.BUY if short else OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                stop_price=float(decision.stop_price),
+                limit_price=_protective_limit(decision.stop_price, short=short),
+                order_class=OrderClass.SIMPLE,
+                client_order_id=_client_order_id(decision.symbol, "stop"),
+            )
+        )
+    except Exception as exc:
+        logger.exception("PROTECTION_FAILED symbol=%s entry=%s", decision.symbol, entry_id)
+        try:
+            close = _close_symbol(client, decision.symbol)
+            return OrderResult(
+                entry_id,
+                "protection_failed_closed",
+                f"stop submit failed ({type(exc).__name__}); close order {close.id}",
+            )
+        except Exception as close_exc:
+            return OrderResult(
+                entry_id,
+                "protection_failed_open",
+                f"stop submit failed ({type(exc).__name__}); close also failed ({type(close_exc).__name__})",
+            )
     return OrderResult(
-        str(order.id),
-        str(order.status),
-        "stock bracket submitted",
-        fill_price=_text_number(getattr(order, "filled_avg_price", None)),
+        entry_id,
+        status,
+        f"entry filled {format(filled, 'f')}; protective stop {protection.id}",
+        fill_price=_text_number(getattr(entry, "filled_avg_price", None)),
     )
 
 

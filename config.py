@@ -60,8 +60,11 @@ MULTI_STRATEGY_IDS: tuple[str, ...] = (
     "anchored_vwap_mean_reversion",
     "ema_stack_pullback",
 )
-# Alpaca brackets cannot be fractional. Stock size is whole shares, floored.
-EQUITY_QTY_QUANTUM = Decimal("1")
+# IWM/QQQ/DIA already allow Alpaca fractionals. Brackets cannot be fractional,
+# so entries are a simple DAY market plus a DAY stop-limit. Longs size in
+# millionths of a share. Shorts stay whole shares; Alpaca rejects a fractional short.
+EQUITY_QTY_QUANTUM = Decimal("0.000001")
+SHORT_EQUITY_QTY_QUANTUM = Decimal("1")
 
 # Concurrent positions across the whole book. A working entry in a symbol we
 # do not already hold occupies one of these slots. Locked at 3.
@@ -149,7 +152,8 @@ def _require(condition: bool, message: str) -> None:
         raise RuntimeError(f"invalid risk configuration: {message}")
 
 
-_require(EQUITY_QTY_QUANTUM == Decimal("1"), "stock brackets need whole shares")
+_require(EQUITY_QTY_QUANTUM == Decimal("0.000001"), "stock longs size in fractional shares")
+_require(SHORT_EQUITY_QTY_QUANTUM == Decimal("1"), "stock shorts stay whole shares")
 _require(MAX_OPEN_POSITIONS == 3, "V1 allows three open positions")
 _require(MAX_RISK_FRACTION == Decimal("0.01"), "per-trade risk is 1% of current equity")
 _require(DAILY_LOSS_FRACTION == Decimal("0.03"), "daily loss halt is 3%")

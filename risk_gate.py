@@ -16,7 +16,8 @@ Rules enforced here:
   its own symbol. The same symbol cannot be entered again while it is open.
 - Quantity comes from the stop distance. A full stop-out at the stop price,
   after a small slippage allowance, loses no more than 1% of current equity.
-  Quantity is floored to 1e-8. Notional is capped at equity and buying power.
+  Quantity is floored to 1e-8 for crypto and to 1e-6 for stock longs.
+  Stock shorts stay whole shares. Notional is capped at equity and buying power.
 - The stop has to sit below the ask, and the target above it. The ask is the
   entry. A caller-supplied entry price is ignored.
 - Daily loss at or beyond 3% of UTC-day-start equity halts new entries.
@@ -473,8 +474,10 @@ def _evaluate_entry(request: GateRequest, symbol: str, model_reason: str) -> Ris
         (ask * config.SLIPPAGE_ALLOWANCE_FRACTION).quantize(config.CENT, rounding=ROUND_UP),
     )
     sizing_distance = stop_distance + slippage
-    # Stocks size in whole shares. Alpaca brackets reject a fractional qty.
-    quantum = config.EQUITY_QTY_QUANTUM if equity_symbol else config.QTY_QUANTUM
+    if equity_symbol:
+        quantum = config.SHORT_EQUITY_QTY_QUANTUM if short else config.EQUITY_QTY_QUANTUM
+    else:
+        quantum = config.QTY_QUANTUM
     raw_qty = (budget / sizing_distance).quantize(quantum, rounding=ROUND_DOWN)
     max_notional = min(equity, buying_power) * config.MAX_POSITION_FRACTION
     max_qty = (max_notional / ask).quantize(quantum, rounding=ROUND_DOWN)

@@ -1,5 +1,6 @@
 """Execution guards. These tests build request objects and do not call Alpaca."""
 
+from decimal import Decimal
 import unittest
 
 import execution
@@ -62,28 +63,42 @@ class ExecutionGuardTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             execution.submit(object(), approved, allow_send=False)
 
-    def test_stock_bracket_uses_whole_shares(self) -> None:
+    def test_stock_entry_uses_fractional_simple_orders(self) -> None:
         from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
-        from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
+        from alpaca.trading.requests import MarketOrderRequest, StopLimitOrderRequest
 
-        self.assertEqual(execution.stock_share_qty("359.14"), 359)
-        self.assertEqual(execution.stock_share_qty("359"), 359)
+        self.assertEqual(execution.stock_qty("0.030476"), Decimal("0.030476"))
+        self.assertEqual(execution.stock_qty("0.4"), Decimal("0.4"))
+        self.assertEqual(execution.stock_qty("359.14"), Decimal("359.14"))
         with self.assertRaises(RuntimeError):
-            execution.stock_share_qty("0.4")
+            execution.stock_qty("0")
 
         entry = MarketOrderRequest(
-            symbol="MTUM",
-            qty=execution.stock_share_qty("359.14"),
+            symbol="QQQ",
+            qty=format(execution.stock_qty("0.030476"), "f"),
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
-            order_class=OrderClass.BRACKET,
-            take_profit=TakeProfitRequest(limit_price=283.95),
-            stop_loss=StopLossRequest(stop_price=276.40),
+            order_class=OrderClass.SIMPLE,
         )
         fields = entry.to_request_fields()
-        self.assertEqual(fields["order_class"], "bracket")
-        self.assertEqual(int(float(fields["qty"])), 359)
-        self.assertEqual(fields["qty"], 359)
+        self.assertEqual(fields["order_class"], "simple")
+        self.assertEqual(fields["time_in_force"], "day")
+        self.assertNotIn("take_profit", fields)
+        self.assertNotIn("stop_loss", fields)
+
+        stop = StopLimitOrderRequest(
+            symbol="QQQ",
+            qty=format(execution.stock_qty("0.030476"), "f"),
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            stop_price=495.0,
+            limit_price=execution._protective_limit("495.00"),
+            order_class=OrderClass.SIMPLE,
+        )
+        stop_fields = stop.to_request_fields()
+        self.assertEqual(stop_fields["type"], "stop_limit")
+        self.assertEqual(stop_fields["time_in_force"], "day")
+        self.assertLess(stop_fields["limit_price"], stop_fields["stop_price"])
 
     def test_paper_url_guard(self) -> None:
         import config
