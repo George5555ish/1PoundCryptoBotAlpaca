@@ -410,6 +410,27 @@ class DecisionLog:
             str(target) if target else None,
         )
 
+    def latest_entry_strategy_id(self, symbol: str) -> str | None:
+        """Strategy that opened the newest submitted or dry-run entry for a symbol."""
+
+        canonical = config.normalize_symbol(symbol)
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT strategy_id FROM decisions
+                WHERE symbol = ?
+                  AND order_kind = ?
+                  AND final_action IN ('submitted', 'dry_run')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (canonical, "entry_market"),
+            ).fetchone()
+        if row is None:
+            return None
+        raw = row["strategy_id"]
+        return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
     def stats(self) -> dict[str, object]:
         """Counts and the newest row for the dashboard. Never touches the broker."""
 

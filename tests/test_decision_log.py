@@ -143,6 +143,22 @@ class DecisionLogTests(unittest.TestCase):
                 action_type="entry_evaluation",
             )
             self.assertEqual(log.latest_entry_levels("BTCUSD"), ("99000", "102000"))
+            log.write(
+                timestamp=now,
+                market_context={"strategy_id": "anchored_vwap_mean_reversion"},
+                ai_suggestion={"action": "enter"},
+                risk_verdict="approve",
+                risk_reason="sized",
+                risk_decision={"stop_price": "90", "target_price": "110", "approved": True},
+                position_size="0.04",
+                final_action="submitted",
+                symbol="IWM",
+                order_kind="entry_market",
+                action_type="entry_evaluation",
+                strategy_id="anchored_vwap_mean_reversion",
+            )
+            self.assertEqual(log.latest_entry_strategy_id("IWM"), "anchored_vwap_mean_reversion")
+            self.assertEqual(log.latest_entry_levels("IWM"), ("90", "110"))
             with self.assertRaises(ValueError):
                 log.write(
                     timestamp=now,

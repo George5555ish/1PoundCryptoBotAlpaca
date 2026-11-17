@@ -529,6 +529,7 @@ def run_cycle(
         if status == "flatten" and config.is_crypto_symbol(position.symbol):
             continue
         stop, target = decisions.latest_entry_levels(position.symbol)
+        entry_strategy = decisions.latest_entry_strategy_id(position.symbol)
         view = scan.for_symbol(position.symbol)
         if status == "flatten":
             review = positions.PositionReview(
@@ -553,6 +554,7 @@ def run_cycle(
                 side=position.side,
                 avg_entry_price=position.avg_entry_price,
                 unrealized_plpc=position.unrealized_plpc,
+                strategy_id=entry_strategy,
             )
             strategy_exit = None
             if review.decision != "close" and view is not None and not lock_on:
@@ -568,7 +570,9 @@ def run_cycle(
                         trend=review.trend,
                     )
         context = bot._position_context(now, account, day_start, book, review, stop, target)
-        context["strategy_id"] = None if strategy_exit is None else strategy_exit.get("strategy_id")
+        context["strategy_id"] = (
+            None if strategy_exit is None else strategy_exit.get("strategy_id")
+        ) or entry_strategy
         if review.decision != "close":
             cycle_rows.extend(
                 bot._log_position_hold(

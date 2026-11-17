@@ -120,6 +120,54 @@ class PositionReviewTests(unittest.TestCase):
         )
         self.assertEqual(review.decision, "hold")
 
+    def test_vwap_mean_reversion_holds_through_lower_lows(self) -> None:
+        review = positions.review_position(
+            symbol="IWM",
+            qty="0.04",
+            current_price="99.00",
+            unrealized_pl="-1",
+            trend="lower lows",
+            stop_price="90.00",
+            target_price="110.00",
+            side="long",
+            avg_entry_price="100.00",
+            strategy_id="anchored_vwap_mean_reversion",
+        )
+        self.assertEqual(review.decision, "hold")
+        self.assertIn("ignores a lower lows label", review.reason)
+
+    def test_vwap_mean_reversion_still_stops_out(self) -> None:
+        review = positions.review_position(
+            symbol="QQQ",
+            qty="0.03",
+            current_price="89.00",
+            unrealized_pl="-1.10",
+            trend="lower lows",
+            stop_price="90.00",
+            target_price="110.00",
+            side="long",
+            avg_entry_price="90.50",
+            strategy_id="anchored_vwap_mean_reversion",
+        )
+        self.assertEqual(review.decision, "close")
+        self.assertIn("protective stop", review.reason)
+
+    def test_other_strategy_still_closes_on_lower_lows(self) -> None:
+        review = positions.review_position(
+            symbol="DIA",
+            qty="0.02",
+            current_price="99.00",
+            unrealized_pl="-1",
+            trend="lower lows",
+            stop_price="90.00",
+            target_price="110.00",
+            side="long",
+            avg_entry_price="100.00",
+            strategy_id="ema_stack_pullback",
+        )
+        self.assertEqual(review.decision, "close")
+        self.assertIn("lower lows", review.reason)
+
     def test_missing_levels_hold_without_a_lower_low(self) -> None:
         review = positions.review_position(
             symbol="BTC/USD",

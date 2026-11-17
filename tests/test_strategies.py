@@ -49,20 +49,54 @@ class StrategyEngineTests(unittest.TestCase):
             strategies.enabled_ids(("not_a_strategy",))
 
     def test_mean_reversion_shorts_a_stretch_above_vwap(self) -> None:
-        candles = _bars([100.0] * 20 + [109.0])
+        candles = _bars([100.0] * 20 + [109.0, 108.4])
         payload = anchored_vwap_mean_reversion.evaluate("SPY", candles, {})
         self.assertEqual(payload["action"], "enter")
         self.assertEqual(payload["direction"], "short")
-        self.assertGreater(payload["stop_price"], 109.0)
-        self.assertLess(payload["target_price"], 109.0)
+        self.assertGreater(payload["stop_price"], 108.4)
+        self.assertLess(payload["target_price"], 108.4)
 
     def test_mean_reversion_longs_a_stretch_below_vwap(self) -> None:
-        candles = _bars([100.0] * 20 + [91.0])
+        candles = _bars([100.0] * 20 + [91.0, 91.6])
         payload = anchored_vwap_mean_reversion.evaluate("QQQ", candles, {})
         self.assertEqual(payload["action"], "enter")
         self.assertEqual(payload["direction"], "long")
-        self.assertLess(payload["stop_price"], 91.0)
-        self.assertGreater(payload["target_price"], 91.0)
+        self.assertLess(payload["stop_price"], 91.6)
+        self.assertGreater(payload["target_price"], 91.6)
+
+    def test_mean_reversion_holds_a_stretch_with_no_bounce(self) -> None:
+        candles = _bars([100.0] * 20 + [91.0])
+        payload = anchored_vwap_mean_reversion.evaluate("QQQ", candles, {})
+        self.assertEqual(payload["action"], "hold")
+        self.assertIn("no bounce", payload["reason"])
+
+    def test_mean_reversion_longs_against_lower_lows_when_allowed(self) -> None:
+        candles = _bars([100.0] * 20 + [91.0, 91.6])
+        payload = anchored_vwap_mean_reversion.evaluate(
+            "IWM",
+            candles,
+            {"candle_summary": {"trend": "lower lows"}},
+        )
+        self.assertTrue(anchored_vwap_mean_reversion.ALLOW_AGAINST_TREND)
+        self.assertEqual(payload["action"], "enter")
+        self.assertEqual(payload["direction"], "long")
+        self.assertIn("lower lows", payload["reason"])
+        self.assertIn("against-trend allowed", payload["reason"])
+
+    def test_mean_reversion_can_require_higher_highs(self) -> None:
+        candles = _bars([100.0] * 20 + [91.0, 91.6])
+        original = anchored_vwap_mean_reversion.ALLOW_AGAINST_TREND
+        anchored_vwap_mean_reversion.ALLOW_AGAINST_TREND = False
+        try:
+            payload = anchored_vwap_mean_reversion.evaluate(
+                "IWM",
+                candles,
+                {"candle_summary": {"trend": "lower lows"}},
+            )
+        finally:
+            anchored_vwap_mean_reversion.ALLOW_AGAINST_TREND = original
+        self.assertEqual(payload["action"], "hold")
+        self.assertIn("aligned-only mode needs higher highs", payload["reason"])
 
     def test_ema_stack_holds_when_the_stack_is_inverted(self) -> None:
         candles = _bars(list(range(80, 20, -1)))

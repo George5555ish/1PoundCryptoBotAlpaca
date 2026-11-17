@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 import config
+from strategies.anchored_vwap_mean_reversion import skip_trend_flip_exit
 
 
 @dataclass(frozen=True)
@@ -72,13 +73,17 @@ def review_position(
     side: str = "long",
     avg_entry_price: str | None = None,
     unrealized_plpc: str | None = None,
+    strategy_id: str | None = None,
 ) -> PositionReview:
     """Decide hold or close for one open position.
 
     Stock/ETF names also close immediately when unrealized P/L from average
     entry reaches ``POSITION_LOSS_CLOSE_FRACTION`` (default -2%). Longs then
-    close on stop, target, or "lower lows". Shorts invert those prices and
-    close on "higher highs". Missing prices do not invent an exit.
+    close on stop or target. A "lower lows" label still closes trend-following
+    longs, but not ``anchored_vwap_mean_reversion``: that setup can be a
+    stretch against a messy swing, so invalidation is the stop, the target,
+    or the -2% dump. Shorts invert those prices and close on "higher highs"
+    unless they came from the same mean-reversion rule.
     """
 
     price = _number(current_price)
@@ -102,7 +107,7 @@ def review_position(
     elif short and price is not None and target is not None and price <= target:
         decision = "close"
         reason = "price reached the original target"
-    elif short and trend_text == "higher highs":
+    elif short and trend_text == "higher highs" and not skip_trend_flip_exit(strategy_id):
         decision = "close"
         reason = "trend flipped against the short"
     elif not short and price is not None and stop is not None and price <= stop:
@@ -111,9 +116,15 @@ def review_position(
     elif not short and price is not None and target is not None and price >= target:
         decision = "close"
         reason = "price reached the original target"
-    elif not short and trend_text == "lower lows":
+    elif not short and trend_text == "lower lows" and not skip_trend_flip_exit(strategy_id):
         decision = "close"
         reason = "trend flipped to lower lows"
+    elif skip_trend_flip_exit(strategy_id) and trend_text:
+        decision = "hold"
+        reason = (
+            f"hold; {strategy_id} ignores a {trend_text} label until stop, target, "
+            "or the -2% dump invalidates"
+        )
     elif trend_text:
         decision = "hold"
         reason = f"hold; trend is {trend_text} and neither the stop nor the target has been hit"
